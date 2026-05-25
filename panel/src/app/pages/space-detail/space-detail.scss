@@ -1,31 +1,23 @@
-.mono { font-family: var(--font-mono); font-size: 12px; }
-
 .create-card {
-  margin-bottom: 16px;
+  margin-bottom: 14px;
   overflow: hidden;
 
   .create-header {
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
-    background: var(--bg-table-header);
+    background: #FAFAFA;
   }
 
-  .create-body {
-    padding: 16px;
-  }
+  .create-body { padding: 16px; }
 }
 
 .form-row {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
+  gap: 14px;
   margin-bottom: 14px;
 
   @media (max-width: 700px) { grid-template-columns: 1fr; }
 }
 
 .field { display: flex; flex-direction: column; }
-
-.unit-hint { font-weight: 400; color: var(--text-secondary); }
-
-.btn-sm { padding: 5px 12px; font-size: 12px; }

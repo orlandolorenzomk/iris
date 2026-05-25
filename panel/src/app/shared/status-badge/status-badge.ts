@@ -8,18 +8,50 @@ import { CommonModule } from '@angular/common';
   template: `<span class="badge" [ngClass]="color">{{ status }}</span>`,
   styles: [`
     .badge {
-      display: inline-block;
-      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
       font-weight: 600;
-      padding: 2px 8px;
-      border-radius: 2px;
+      padding: 2px 10px;
+      border-radius: 12px;
       text-transform: uppercase;
-      letter-spacing: 0.3px;
+      letter-spacing: 0.2px;
+      white-space: nowrap;
 
-      &.green  { background: var(--success-bg); color: var(--success-fg); border-left: 3px solid var(--success-fg); }
-      &.amber  { background: var(--warning-bg); color: var(--warning-fg); border-left: 3px solid var(--warning-fg); }
-      &.red    { background: var(--error-bg);   color: var(--error-fg);   border-left: 3px solid var(--error-fg); }
-      &.gray   { background: #F2F3F3;            color: #5F6B7A;           border-left: 3px solid #AAB7B8; }
+      &::before {
+        content: '';
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      &.green {
+        background: #F2FAF2;
+        color: #1E8900;
+        border: 1px solid #BFE6BF;
+        &::before { background: #1E8900; }
+      }
+      &.amber {
+        background: #FEF9E7;
+        color: #8D6605;
+        border: 1px solid #F3D78A;
+        &::before { background: #D68910; }
+      }
+      &.red {
+        background: #FDF3F1;
+        color: #D13212;
+        border: 1px solid #F5C6C3;
+        &::before { background: #D13212; }
+      }
+      &.gray {
+        background: #F2F3F3;
+        color: #545B64;
+        border: 1px solid #D5DBDB;
+        &::before { background: #879596; }
+      }
     }
   `],
   changeDetection: ChangeDetectionStrategy.OnPush

@@ -3,30 +3,25 @@
   overflow: hidden;
 
   .create-header {
-    padding: 16px 20px;
+    padding: 14px 18px;
     border-bottom: 1px solid var(--border);
-    background: var(--bg-table-header);
+    background: #FAFAFA;
 
-    h2 { margin-bottom: 4px; }
+    h2 { margin-bottom: 3px; }
     p  { font-size: 12px; color: var(--text-secondary); }
   }
 
-  .create-body {
-    padding: 20px;
-  }
+  .create-body { padding: 18px; }
 }
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
   gap: 14px;
   margin-bottom: 14px;
 }
 
-.field { display: flex; flex-direction: column; &.full { margin-bottom: 14px; } }
-
-.unit-hint { font-weight: 400; color: var(--text-secondary); }
-
+.field     { display: flex; flex-direction: column; &.full { margin-bottom: 14px; } }
 .form-actions { display: flex; gap: 8px; margin-top: 4px; }
 
 textarea {
@@ -42,16 +37,16 @@ textarea {
 }
 
 .role-badge {
-  display: inline-block;
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
   font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 2px;
+  padding: 2px 10px;
+  border-radius: 12px;
   background: var(--info-bg);
   color: var(--info-fg);
-  border-left: 3px solid var(--info-fg);
+  border: 1px solid #B0C7E8;
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
 }
-
-.btn-sm { padding: 5px 12px; font-size: 12px; }

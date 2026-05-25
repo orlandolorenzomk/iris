@@ -3,30 +3,24 @@
   overflow: hidden;
 
   .create-card-header {
-    padding: 16px 20px;
+    padding: 14px 18px;
     border-bottom: 1px solid var(--border);
-    background: var(--bg-table-header);
+    background: #FAFAFA;
 
-    h2 { margin-bottom: 4px; }
+    h2 { margin-bottom: 3px; }
     p  { font-size: 12px; color: var(--text-secondary); }
   }
 
-  .create-card-body {
-    padding: 20px;
-  }
+  .create-card-body { padding: 18px; }
 }
 
 .form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 16px;
-  margin-bottom: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
 }
 
 .field { display: flex; flex-direction: column; }
 
-.unit-hint { font-weight: 400; color: var(--text-secondary); }
-
 .form-actions { display: flex; gap: 8px; }
-
-.btn-sm { padding: 5px 12px; font-size: 12px; }
