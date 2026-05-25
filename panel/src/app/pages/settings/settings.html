@@ -1,0 +1,34 @@
+<div class="page-header">
+  <h1 class="page-title">Settings</h1>
+</div>
+
+<div class="card settings-card">
+  <div class="settings-header">
+    <h2>Cluster Settings</h2>
+    <p>Global infrastructure configuration. Applied to all nodes.</p>
+  </div>
+
+  @if (error()) { <div class="error-msg">{{ error() }}</div> }
+  @if (saved())  { <div class="success-msg">Settings saved successfully.</div> }
+
+  <div class="settings-form">
+    <div class="field">
+      <label>SDN Zone Type</label>
+      <select [(ngModel)]="form.sdnZoneType">
+        <option value="SIMPLE">SIMPLE — single node, Linux bridges</option>
+        <option value="VXLAN">VXLAN — multi-node, UDP encapsulation</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>SDN Zone Name</label>
+      <input type="text" [(ngModel)]="form.sdnZoneName" placeholder="iris" />
+    </div>
+    <div class="field">
+      <label>NATS URL</label>
+      <input type="text" [(ngModel)]="form.natsUrl" placeholder="nats://localhost:4222" />
+    </div>
+    <div class="field-actions">
+      <button class="btn-primary" (click)="save()">Save changes</button>
+    </div>
+  </div>
+</div>

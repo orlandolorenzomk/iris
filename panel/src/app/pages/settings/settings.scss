@@ -1,0 +1,24 @@
+.settings-card { max-width: 560px; overflow: hidden; }
+
+.settings-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-table-header);
+
+  h2 { margin-bottom: 4px; }
+  p  { font-size: 13px; color: var(--text-secondary); }
+}
+
+.settings-form {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+
+.field-actions { padding-top: 4px; }
+
+.error-msg   { margin: 0 24px; background: var(--error-bg);   color: var(--error-fg);   padding: 10px 12px; border-radius: 2px; font-size: 13px; }
+.success-msg { margin: 0 24px; background: var(--success-bg); color: var(--success-fg); padding: 10px 12px; border-radius: 2px; font-size: 13px; }

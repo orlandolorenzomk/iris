@@ -1,0 +1,56 @@
+<div class="page-header">
+  <h1 class="page-title">Dashboard</h1>
+</div>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <span class="stat-label">Total Spaces</span>
+    <span class="stat-value">{{ totalSpaces }}</span>
+    <a routerLink="/spaces" class="stat-link">View spaces →</a>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">Active Machines</span>
+    <span class="stat-value green">{{ activeMachines }}</span>
+    <a routerLink="/machines" class="stat-link">View machines →</a>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">Unavailable Machines</span>
+    <span class="stat-value" [class.red]="unavailMachines > 0">{{ unavailMachines }}</span>
+    <a routerLink="/machines" class="stat-link">View machines →</a>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">Total Deployments</span>
+    <span class="stat-value">0</span>
+    <span class="stat-link muted">Coming soon</span>
+  </div>
+</div>
+
+<div class="section-title">Machines</div>
+<div class="card table-card">
+  @if (machines().length === 0) {
+    <div class="empty-state">No machines registered yet.</div>
+  } @else {
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Host</th>
+          <th>Status</th>
+          <th>Primary</th>
+          <th>Registered</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (m of machines(); track m.id) {
+          <tr>
+            <td class="primary">{{ m.name }}</td>
+            <td class="mono">{{ m.host }}</td>
+            <td><app-status-badge [status]="m.status" /></td>
+            <td>{{ m.isPrimary ? '✓' : '—' }}</td>
+            <td>{{ m.createdAt | date:'MMM d, y' }}</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  }
+</div>

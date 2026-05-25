@@ -1,0 +1,27 @@
+.space-id { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+
+.quota-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 28px;
+  @media (max-width: 800px) { grid-template-columns: repeat(2, 1fr); }
+}
+
+.quota-card {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  .quota-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); }
+  .quota-value { font-size: 22px; font-weight: 700; color: var(--text-primary); &.sm { font-size: 15px; } }
+}
+
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.section-title  { font-size: 13px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.6px; }
+
+.form-card { padding: 16px 20px; margin-bottom: 16px; }
+.form-row  { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 12px; }
+.field     { display: flex; flex-direction: column; }
+.table-card { overflow: hidden; }

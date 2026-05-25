@@ -1,0 +1,27 @@
+<div class="login-page">
+  <div class="login-card">
+    <div class="login-header">
+      <span class="logo-text">iris</span>
+      <span class="logo-sub">panel</span>
+    </div>
+    <p class="login-subtitle">Sign in to your account</p>
+
+    @if (error()) {
+      <div class="error-box">{{ error() }}</div>
+    }
+
+    <form (ngSubmit)="submit()">
+      <div class="field">
+        <label for="email">Email address</label>
+        <input id="email" type="email" [(ngModel)]="email" name="email" placeholder="admin@example.com" autocomplete="email" />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" [(ngModel)]="password" name="password" placeholder="••••••••" autocomplete="current-password" />
+      </div>
+      <button type="submit" class="btn-primary submit-btn" [disabled]="loading()">
+        {{ loading() ? 'Signing in…' : 'Sign in' }}
+      </button>
+    </form>
+  </div>
+</div>

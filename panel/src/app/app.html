@@ -1,0 +1,36 @@
+@if (isLogin()) {
+  <router-outlet />
+} @else {
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="logo-text">iris</span>
+        <span class="logo-sub">panel</span>
+      </div>
+      <nav class="sidebar-nav">
+        @for (item of nav; track item.path) {
+          <a class="nav-item" [routerLink]="item.path" routerLinkActive="active">
+            <span class="nav-icon">{{ item.icon }}</span>
+            <span>{{ item.label }}</span>
+          </a>
+        }
+      </nav>
+      <div class="sidebar-footer">
+        @if (user) {
+          <span class="user-email">{{ user.email }}</span>
+          <span class="user-role">{{ user.role }}</span>
+        }
+      </div>
+    </aside>
+
+    <div class="main-wrap">
+      <header class="topbar">
+        <span class="topbar-title">Iris Panel</span>
+        <button class="btn-logout" (click)="logout()">Sign out</button>
+      </header>
+      <main class="content">
+        <router-outlet />
+      </main>
+    </div>
+  </div>
+}

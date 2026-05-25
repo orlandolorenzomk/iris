@@ -1,0 +1,30 @@
+.form-card {
+  padding: 20px;
+  margin-bottom: 20px;
+
+  h3 { margin-bottom: 16px; }
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.field { display: flex; flex-direction: column; }
+
+.form-actions { display: flex; gap: 8px; }
+
+.error-msg {
+  background: var(--error-bg);
+  color: var(--error-fg);
+  padding: 8px 12px;
+  border-radius: 2px;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.table-card { overflow: hidden; }
+
+.clickable { cursor: pointer; }

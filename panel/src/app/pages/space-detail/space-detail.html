@@ -1,0 +1,76 @@
+@if (space()) {
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">{{ space().name }}</h1>
+      <span class="space-id">{{ space().id }}</span>
+    </div>
+  </div>
+
+  <div class="quota-grid">
+    <div class="quota-card card">
+      <span class="quota-label">CPU Limit</span>
+      <span class="quota-value">{{ space().cpuLimit }} cores</span>
+    </div>
+    <div class="quota-card card">
+      <span class="quota-label">RAM Limit</span>
+      <span class="quota-value">{{ space().ramLimit }} MB</span>
+    </div>
+    <div class="quota-card card">
+      <span class="quota-label">Storage Limit</span>
+      <span class="quota-value">{{ space().storageLimit }} GB</span>
+    </div>
+    <div class="quota-card card">
+      <span class="quota-label">Created</span>
+      <span class="quota-value sm">{{ space().createdAt | date:'MMM d, y' }}</span>
+    </div>
+  </div>
+
+  <div class="section-header">
+    <div class="section-title">Space Networks</div>
+    <button class="btn-primary" (click)="showForm.set(!showForm())">
+      {{ showForm() ? 'Cancel' : '+ Add Network' }}
+    </button>
+  </div>
+
+  @if (showForm()) {
+    <div class="card form-card">
+      <div class="form-row">
+        <div class="field"><label>VNet ID</label><input type="text" [(ngModel)]="form.vnetId" placeholder="space-42" /></div>
+        <div class="field"><label>Subnet</label><input type="text" [(ngModel)]="form.subnet" placeholder="10.42.0.0/24" /></div>
+        <div class="field"><label>VNI (optional)</label><input type="number" [(ngModel)]="form.vni" placeholder="10042" /></div>
+      </div>
+      <button class="btn-primary" (click)="addNetwork()">Add</button>
+    </div>
+  }
+
+  <div class="card table-card">
+    @if (networks().length === 0) {
+      <div class="empty-state">No networks configured for this space.</div>
+    } @else {
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>VNet ID</th>
+            <th>Subnet</th>
+            <th>VNI</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (n of networks(); track n.id) {
+            <tr>
+              <td class="mono">{{ n.vnetId }}</td>
+              <td class="mono">{{ n.subnet }}</td>
+              <td>{{ n.vni ?? '—' }}</td>
+              <td><app-status-badge [status]="n.status" /></td>
+              <td>{{ n.createdAt | date:'MMM d, y' }}</td>
+              <td><button class="btn-icon" (click)="deleteNetwork(n.id)" title="Delete">✕</button></td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  </div>
+}
