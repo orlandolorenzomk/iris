@@ -23,7 +23,7 @@ Nexus is the only component exposed to the outside world. All traffic from Panel
 
 ```
 Iris Panel  ──┐
-Iris CLI    ──┤  REST / WS  ┌─────────────┐   NATS JetStream   ┌─────────────┐
+Iris CLI    ──┤  REST / WS  ┌─────────────┐   NATS JetStream    ┌─────────────┐
               └────────────▶│ Iris Nexus  │──────────────────▶  │ Iris Prism  │  (per node)
 Docker CLI  ──────────────▶ │             │──────────────────▶  │ Iris Orbit  │  (per node)
               HTTP OCI      └─────────────┘                     └─────────────┘
