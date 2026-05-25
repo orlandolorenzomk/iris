@@ -1,35 +1,72 @@
 <div class="page-header">
-  <h1 class="page-title">Dashboard</h1>
+  <div>
+    <h1>Dashboard</h1>
+    <p class="page-meta">Overview of your Iris cloud infrastructure</p>
+  </div>
 </div>
 
 <div class="stat-grid">
-  <div class="stat-card">
-    <span class="stat-label">Total Spaces</span>
+  <div class="stat-card card">
+    <div class="stat-top">
+      <span class="stat-label">Total Spaces</span>
+      <span class="stat-icon">◈</span>
+    </div>
     <span class="stat-value">{{ totalSpaces }}</span>
-    <a routerLink="/spaces" class="stat-link">View spaces →</a>
+    <div class="stat-footer">
+      <a routerLink="/spaces">View all spaces →</a>
+    </div>
   </div>
-  <div class="stat-card">
-    <span class="stat-label">Active Machines</span>
-    <span class="stat-value green">{{ activeMachines }}</span>
-    <a routerLink="/machines" class="stat-link">View machines →</a>
+
+  <div class="stat-card card">
+    <div class="stat-top">
+      <span class="stat-label">Active Machines</span>
+      <span class="stat-icon">◉</span>
+    </div>
+    <span class="stat-value success">{{ activeMachines }}</span>
+    <div class="stat-footer">
+      <a routerLink="/machines">View machines →</a>
+    </div>
   </div>
-  <div class="stat-card">
-    <span class="stat-label">Unavailable Machines</span>
-    <span class="stat-value" [class.red]="unavailMachines > 0">{{ unavailMachines }}</span>
-    <a routerLink="/machines" class="stat-link">View machines →</a>
+
+  <div class="stat-card card">
+    <div class="stat-top">
+      <span class="stat-label">Unavailable Machines</span>
+      <span class="stat-icon">◎</span>
+    </div>
+    <span class="stat-value" [class.danger]="unavailMachines > 0">{{ unavailMachines }}</span>
+    <div class="stat-footer">
+      <a routerLink="/machines">View machines →</a>
+    </div>
   </div>
-  <div class="stat-card">
-    <span class="stat-label">Total Deployments</span>
-    <span class="stat-value">0</span>
-    <span class="stat-link muted">Coming soon</span>
+
+  <div class="stat-card card">
+    <div class="stat-top">
+      <span class="stat-label">Total Deployments</span>
+      <span class="stat-icon">⬡</span>
+    </div>
+    <span class="stat-value muted">0</span>
+    <div class="stat-footer">
+      <span class="muted-text">Coming soon</span>
+    </div>
   </div>
 </div>
 
-<div class="section-title">Machines</div>
-<div class="card table-card">
+<div class="section-header">
+  <span class="section-title">Machines</span>
+  <a routerLink="/machines" class="btn-link" style="font-size:12px">View all →</a>
+</div>
+
+<div class="card" style="overflow:hidden">
   @if (machines().length === 0) {
-    <div class="empty-state">No machines registered yet.</div>
+    <div class="empty-state">
+      <div class="empty-title">No machines registered</div>
+      <div class="empty-sub">Register a Proxmox node to get started.</div>
+      <a routerLink="/machines" class="btn-primary" style="display:inline-block;padding:7px 16px">Register machine</a>
+    </div>
   } @else {
+    <div class="table-toolbar">
+      <span class="toolbar-title">Machines <span class="count">({{ machines().length }})</span></span>
+    </div>
     <table class="data-table">
       <thead>
         <tr>
@@ -46,8 +83,14 @@
             <td class="primary">{{ m.name }}</td>
             <td class="mono">{{ m.host }}</td>
             <td><app-status-badge [status]="m.status" /></td>
-            <td>{{ m.isPrimary ? '✓' : '—' }}</td>
-            <td>{{ m.createdAt | date:'MMM d, y' }}</td>
+            <td>
+              @if (m.isPrimary) {
+                <span class="primary-badge">Primary</span>
+              } @else {
+                <span class="dim-text">—</span>
+              }
+            </td>
+            <td class="dim">{{ m.createdAt | date:'MMM d, y' }}</td>
           </tr>
         }
       </tbody>

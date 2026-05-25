@@ -1,34 +1,59 @@
 <div class="page-header">
-  <h1 class="page-title">Settings</h1>
+  <div>
+    <h1>Settings</h1>
+    <p class="page-meta">Global infrastructure configuration</p>
+  </div>
 </div>
 
-<div class="card settings-card">
-  <div class="settings-header">
-    <h2>Cluster Settings</h2>
-    <p>Global infrastructure configuration. Applied to all nodes.</p>
-  </div>
+<div class="settings-layout">
+  <div class="card settings-card">
+    <div class="settings-header">
+      <h2>Cluster settings</h2>
+      <p>Applied to all nodes in the Iris cluster. Changes take effect on next apply.</p>
+    </div>
 
-  @if (error()) { <div class="error-msg">{{ error() }}</div> }
-  @if (saved())  { <div class="success-msg">Settings saved successfully.</div> }
+    @if (error()) {
+      <div class="flash flash-error" style="margin: 0 20px 0">{{ error() }}</div>
+    }
+    @if (saved()) {
+      <div class="flash flash-success" style="margin: 0 20px 0">Settings saved successfully.</div>
+    }
 
-  <div class="settings-form">
-    <div class="field">
-      <label>SDN Zone Type</label>
-      <select [(ngModel)]="form.sdnZoneType">
-        <option value="SIMPLE">SIMPLE — single node, Linux bridges</option>
-        <option value="VXLAN">VXLAN — multi-node, UDP encapsulation</option>
-      </select>
+    <div class="settings-body">
+      <div class="field-group">
+        <div class="field-group-title">SDN Configuration</div>
+        <div class="field">
+          <label>SDN Zone Type</label>
+          <select [(ngModel)]="form.sdnZoneType">
+            <option value="SIMPLE">SIMPLE — single node, Linux bridges</option>
+            <option value="VXLAN">VXLAN — multi-node, UDP encapsulation</option>
+          </select>
+          <p class="field-hint">VXLAN is required for multi-node clusters.</p>
+        </div>
+        <div class="field">
+          <label>SDN Zone Name</label>
+          <input type="text" [(ngModel)]="form.sdnZoneName" placeholder="iris" />
+          <p class="field-hint">Identifier for the Proxmox SDN zone.</p>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <div class="field-group-title">Messaging</div>
+        <div class="field">
+          <label>NATS URL</label>
+          <input type="text" [(ngModel)]="form.natsUrl" placeholder="nats://localhost:4222" />
+          <p class="field-hint">NATS JetStream endpoint for inter-node communication.</p>
+        </div>
+      </div>
     </div>
-    <div class="field">
-      <label>SDN Zone Name</label>
-      <input type="text" [(ngModel)]="form.sdnZoneName" placeholder="iris" />
-    </div>
-    <div class="field">
-      <label>NATS URL</label>
-      <input type="text" [(ngModel)]="form.natsUrl" placeholder="nats://localhost:4222" />
-    </div>
-    <div class="field-actions">
+
+    <div class="settings-footer">
       <button class="btn-primary" (click)="save()">Save changes</button>
+      <span class="last-updated">
+        @if (lastUpdated) {
+          Last updated {{ lastUpdated | date:'MMM d, y HH:mm' }}
+        }
+      </span>
     </div>
   </div>
 </div>

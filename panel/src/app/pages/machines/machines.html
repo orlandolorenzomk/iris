@@ -1,36 +1,58 @@
 <div class="page-header">
-  <h1 class="page-title">Machines</h1>
-  <button class="btn-primary" (click)="showForm.set(!showForm())">
-    {{ showForm() ? 'Cancel' : '+ Register Machine' }}
-  </button>
+  <div>
+    <h1>Machines</h1>
+    <p class="page-meta">Proxmox nodes registered in the cluster</p>
+  </div>
+  <div class="page-actions">
+    <button class="btn-secondary" (click)="showForm.set(!showForm())">
+      {{ showForm() ? 'Cancel' : '+ Register machine' }}
+    </button>
+  </div>
 </div>
 
 @if (showForm()) {
-  <div class="card form-card">
-    <h3>Register Machine</h3>
-    @if (error()) { <div class="error-msg">{{ error() }}</div> }
-    <div class="form-grid">
-      <div class="field"><label>Name</label><input type="text" [(ngModel)]="form.name" placeholder="node-01" /></div>
-      <div class="field"><label>Host</label><input type="text" [(ngModel)]="form.host" placeholder="192.168.1.10" /></div>
-      <div class="field"><label>SSH Port</label><input type="number" [(ngModel)]="form.sshPort" /></div>
-      <div class="field"><label>SSH User</label><input type="text" [(ngModel)]="form.sshUser" /></div>
-      <div class="field"><label>Mgmt Interface</label><input type="text" [(ngModel)]="form.mgmtIface" placeholder="eth0" /></div>
-      <div class="field"><label>Secret Key ID</label><input type="text" [(ngModel)]="form.secretKeyId" /></div>
+  <div class="card create-card">
+    <div class="create-header">
+      <h2>Register machine</h2>
+      <p>Add a Proxmox node to the Iris cluster.</p>
     </div>
-    <div class="field full">
-      <label>SSH Key (encrypted)</label>
-      <textarea [(ngModel)]="form.sshKeyEnc" rows="3" placeholder="Paste encrypted SSH private key…"></textarea>
-    </div>
-    <div class="form-actions">
-      <button class="btn-primary" (click)="create()">Register</button>
-      <button class="btn-secondary" (click)="showForm.set(false)">Cancel</button>
+    <div class="create-body">
+      @if (error()) {
+        <div class="flash flash-error">{{ error() }}</div>
+      }
+      <div class="form-grid">
+        <div class="field"><label>Name</label><input type="text" [(ngModel)]="form.name" placeholder="pve-node-01" /></div>
+        <div class="field"><label>Host / IP</label><input type="text" [(ngModel)]="form.host" placeholder="192.168.1.10" /></div>
+        <div class="field"><label>SSH Port</label><input type="number" [(ngModel)]="form.sshPort" placeholder="22" /></div>
+        <div class="field"><label>SSH User</label><input type="text" [(ngModel)]="form.sshUser" placeholder="root" /></div>
+        <div class="field"><label>Mgmt Interface</label><input type="text" [(ngModel)]="form.mgmtIface" placeholder="eth0" /></div>
+        <div class="field"><label>Secret Key ID</label><input type="text" [(ngModel)]="form.secretKeyId" /></div>
+      </div>
+      <div class="field full">
+        <label>SSH Key <span class="unit-hint">(encrypted)</span></label>
+        <textarea [(ngModel)]="form.sshKeyEnc" rows="3" placeholder="Paste encrypted SSH private key…"></textarea>
+      </div>
+      <div class="form-actions">
+        <button class="btn-primary" (click)="create()">Register machine</button>
+        <button class="btn-secondary" (click)="showForm.set(false)">Cancel</button>
+      </div>
     </div>
   </div>
 }
 
-<div class="card table-card">
+<div class="card" style="overflow:hidden">
+  <div class="table-toolbar">
+    <span class="toolbar-title">Machines <span class="count">({{ machines().length }})</span></span>
+    <div class="toolbar-actions">
+      <button class="btn-secondary btn-sm" (click)="load()">↻ Refresh</button>
+    </div>
+  </div>
+
   @if (machines().length === 0) {
-    <div class="empty-state">No machines registered yet.</div>
+    <div class="empty-state">
+      <div class="empty-title">No machines registered</div>
+      <div class="empty-sub">Add a Proxmox node to start managing the cluster.</div>
+    </div>
   } @else {
     <table class="data-table">
       <thead>
@@ -38,11 +60,11 @@
           <th>Name</th>
           <th>Host</th>
           <th>SSH Port</th>
-          <th>Mgmt Iface</th>
-          <th>Primary</th>
+          <th>Mgmt iface</th>
+          <th>Role</th>
           <th>Status</th>
           <th>Registered</th>
-          <th></th>
+          <th style="width:48px"></th>
         </tr>
       </thead>
       <tbody>
@@ -50,9 +72,15 @@
           <tr>
             <td class="primary">{{ m.name }}</td>
             <td class="mono">{{ m.host }}</td>
-            <td>{{ m.sshPort }}</td>
+            <td class="mono">{{ m.sshPort }}</td>
             <td class="mono">{{ m.mgmtIface }}</td>
-            <td>{{ m.isPrimary ? '✓ Primary' : '—' }}</td>
+            <td>
+              @if (m.isPrimary) {
+                <span class="role-badge">Primary</span>
+              } @else {
+                <span style="color:var(--text-secondary)">Worker</span>
+              }
+            </td>
             <td>
               <select class="status-select" [value]="m.status" (change)="updateStatus(m.id, $any($event.target).value)">
                 @for (s of statuses; track s) {
@@ -60,8 +88,8 @@
                 }
               </select>
             </td>
-            <td>{{ m.createdAt | date:'MMM d, y' }}</td>
-            <td><button class="btn-icon" (click)="delete(m.id)" title="Delete">✕</button></td>
+            <td class="dim">{{ m.createdAt | date:'MMM d, y' }}</td>
+            <td><button class="btn-icon" (click)="delete(m.id)" title="Remove machine">✕</button></td>
           </tr>
         }
       </tbody>

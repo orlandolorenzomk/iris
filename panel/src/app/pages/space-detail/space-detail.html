@@ -1,51 +1,75 @@
 @if (space()) {
   <div class="page-header">
     <div>
-      <h1 class="page-title">{{ space().name }}</h1>
-      <span class="space-id">{{ space().id }}</span>
+      <h1>{{ space().name }}</h1>
+      <p class="page-meta mono">{{ space().id }}</p>
     </div>
   </div>
 
-  <div class="quota-grid">
-    <div class="quota-card card">
-      <span class="quota-label">CPU Limit</span>
-      <span class="quota-value">{{ space().cpuLimit }} cores</span>
+  <div class="info-strip">
+    <div class="info-item">
+      <div class="info-label">CPU Limit</div>
+      <div class="info-value">{{ space().cpuLimit }}<span class="info-unit">vCPU</span></div>
     </div>
-    <div class="quota-card card">
-      <span class="quota-label">RAM Limit</span>
-      <span class="quota-value">{{ space().ramLimit }} MB</span>
+    <div class="info-item">
+      <div class="info-label">RAM Limit</div>
+      <div class="info-value">{{ space().ramLimit | number }}<span class="info-unit">MB</span></div>
     </div>
-    <div class="quota-card card">
-      <span class="quota-label">Storage Limit</span>
-      <span class="quota-value">{{ space().storageLimit }} GB</span>
+    <div class="info-item">
+      <div class="info-label">Storage Limit</div>
+      <div class="info-value">{{ space().storageLimit }}<span class="info-unit">GB</span></div>
     </div>
-    <div class="quota-card card">
-      <span class="quota-label">Created</span>
-      <span class="quota-value sm">{{ space().createdAt | date:'MMM d, y' }}</span>
+    <div class="info-item">
+      <div class="info-label">Created</div>
+      <div class="info-value sm">{{ space().createdAt | date:'MMM d, y' }}</div>
     </div>
   </div>
 
   <div class="section-header">
-    <div class="section-title">Space Networks</div>
-    <button class="btn-primary" (click)="showForm.set(!showForm())">
-      {{ showForm() ? 'Cancel' : '+ Add Network' }}
+    <span class="section-title">Space Networks</span>
+    <button class="btn-secondary btn-sm" (click)="showForm.set(!showForm())">
+      {{ showForm() ? 'Cancel' : '+ Add network' }}
     </button>
   </div>
 
   @if (showForm()) {
-    <div class="card form-card">
-      <div class="form-row">
-        <div class="field"><label>VNet ID</label><input type="text" [(ngModel)]="form.vnetId" placeholder="space-42" /></div>
-        <div class="field"><label>Subnet</label><input type="text" [(ngModel)]="form.subnet" placeholder="10.42.0.0/24" /></div>
-        <div class="field"><label>VNI (optional)</label><input type="number" [(ngModel)]="form.vni" placeholder="10042" /></div>
+    <div class="card create-card">
+      <div class="create-header">
+        <h3>Add network</h3>
       </div>
-      <button class="btn-primary" (click)="addNetwork()">Add</button>
+      <div class="create-body">
+        <div class="form-row">
+          <div class="field">
+            <label>VNet ID</label>
+            <input type="text" [(ngModel)]="form.vnetId" placeholder="space-42" />
+          </div>
+          <div class="field">
+            <label>Subnet</label>
+            <input type="text" [(ngModel)]="form.subnet" placeholder="10.42.0.0/24" />
+          </div>
+          <div class="field">
+            <label>VNI <span class="unit-hint">(optional)</span></label>
+            <input type="number" [(ngModel)]="form.vni" placeholder="10042" />
+          </div>
+        </div>
+        <button class="btn-primary btn-sm" (click)="addNetwork()">Add network</button>
+      </div>
     </div>
   }
 
-  <div class="card table-card">
+  <div class="card" style="overflow:hidden">
+    <div class="table-toolbar">
+      <span class="toolbar-title">Networks <span class="count">({{ networks().length }})</span></span>
+      <div class="toolbar-actions">
+        <button class="btn-secondary btn-sm" (click)="loadNetworks(space().id)">↻ Refresh</button>
+      </div>
+    </div>
+
     @if (networks().length === 0) {
-      <div class="empty-state">No networks configured for this space.</div>
+      <div class="empty-state">
+        <div class="empty-title">No networks configured</div>
+        <div class="empty-sub">Add a network to connect workloads in this space.</div>
+      </div>
     } @else {
       <table class="data-table">
         <thead>
@@ -55,18 +79,18 @@
             <th>VNI</th>
             <th>Status</th>
             <th>Created</th>
-            <th></th>
+            <th style="width:48px"></th>
           </tr>
         </thead>
         <tbody>
           @for (n of networks(); track n.id) {
             <tr>
-              <td class="mono">{{ n.vnetId }}</td>
+              <td class="mono primary">{{ n.vnetId }}</td>
               <td class="mono">{{ n.subnet }}</td>
-              <td>{{ n.vni ?? '—' }}</td>
+              <td class="mono">{{ n.vni ?? '—' }}</td>
               <td><app-status-badge [status]="n.status" /></td>
-              <td>{{ n.createdAt | date:'MMM d, y' }}</td>
-              <td><button class="btn-icon" (click)="deleteNetwork(n.id)" title="Delete">✕</button></td>
+              <td class="dim">{{ n.createdAt | date:'MMM d, y' }}</td>
+              <td><button class="btn-icon" (click)="deleteNetwork(n.id)" title="Delete network">✕</button></td>
             </tr>
           }
         </tbody>

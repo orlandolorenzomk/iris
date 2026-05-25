@@ -4,9 +4,14 @@
   <div class="shell">
     <aside class="sidebar">
       <div class="sidebar-header">
-        <span class="logo-text">iris</span>
-        <span class="logo-sub">panel</span>
+        <div class="logo-mark">I</div>
+        <div>
+          <div class="logo-text">Iris</div>
+          <div class="logo-sub">Console</div>
+        </div>
       </div>
+
+      <div class="sidebar-section">Navigation</div>
       <nav class="sidebar-nav">
         @for (item of nav; track item.path) {
           <a class="nav-item" [routerLink]="item.path" routerLinkActive="active">
@@ -15,18 +20,26 @@
           </a>
         }
       </nav>
-      <div class="sidebar-footer">
-        @if (user) {
-          <span class="user-email">{{ user.email }}</span>
-          <span class="user-role">{{ user.role }}</span>
-        }
-      </div>
+
+      <div class="sidebar-footer">Iris Platform v0.1</div>
     </aside>
 
     <div class="main-wrap">
       <header class="topbar">
-        <span class="topbar-title">Iris Panel</span>
-        <button class="btn-logout" (click)="logout()">Sign out</button>
+        <div class="topbar-left">
+          <span>Iris</span>
+          <span class="sep">›</span>
+          <span class="crumb-active">Panel</span>
+        </div>
+        <div class="topbar-right">
+          @if (user) {
+            <div class="topbar-user">
+              <span class="topbar-email">{{ user.email }}</span>
+              <span class="topbar-role">{{ user.role }}</span>
+            </div>
+          }
+          <button class="btn-logout" (click)="logout()">Sign out</button>
+        </div>
       </header>
       <main class="content">
         <router-outlet />

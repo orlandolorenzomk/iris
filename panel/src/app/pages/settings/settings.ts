@@ -14,14 +14,18 @@ import { ApiService } from '../../core/api.service';
 export class SettingsComponent implements OnInit {
   private api = inject(ApiService);
 
-  saved   = signal(false);
-  error   = signal('');
+  saved       = signal(false);
+  error       = signal('');
+  lastUpdated: string | null = null;
 
   form = { sdnZoneType: 'VXLAN', sdnZoneName: '', natsUrl: '' };
 
   ngOnInit() {
     this.api.getClusterSettings().subscribe({
-      next: s => this.form = { sdnZoneType: s.sdnZoneType, sdnZoneName: s.sdnZoneName, natsUrl: s.natsUrl },
+      next: s => {
+        this.form = { sdnZoneType: s.sdnZoneType, sdnZoneName: s.sdnZoneName, natsUrl: s.natsUrl };
+        this.lastUpdated = s.updatedAt ?? null;
+      },
       error: () => {}
     });
   }
@@ -29,7 +33,7 @@ export class SettingsComponent implements OnInit {
   save() {
     this.error.set('');
     this.api.updateClusterSettings(this.form).subscribe({
-      next: () => { this.saved.set(true); setTimeout(() => this.saved.set(false), 2500); },
+      next: (s) => { this.lastUpdated = s?.updatedAt ?? new Date().toISOString(); this.saved.set(true); setTimeout(() => this.saved.set(false), 2500); },
       error: () => this.error.set('Failed to save settings.')
     });
   }

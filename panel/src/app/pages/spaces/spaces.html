@@ -1,63 +1,87 @@
 <div class="page-header">
-  <h1 class="page-title">Spaces</h1>
-  <button class="btn-primary" (click)="showForm.set(!showForm())">
-    {{ showForm() ? 'Cancel' : '+ Create Space' }}
-  </button>
+  <div>
+    <h1>Spaces</h1>
+    <p class="page-meta">Isolated resource pools for workload separation</p>
+  </div>
+  <div class="page-actions">
+    <button class="btn-secondary" (click)="showForm.set(!showForm())" [class.btn-secondary]="showForm()">
+      {{ showForm() ? 'Cancel' : '+ Create space' }}
+    </button>
+  </div>
 </div>
 
 @if (showForm()) {
-  <div class="card form-card">
-    <h3>New Space</h3>
-    @if (error()) { <div class="error-msg">{{ error() }}</div> }
-    <div class="form-grid">
-      <div class="field">
-        <label>Name</label>
-        <input type="text" [(ngModel)]="form.name" placeholder="my-space" />
-      </div>
-      <div class="field">
-        <label>CPU Limit (cores)</label>
-        <input type="number" [(ngModel)]="form.cpuLimit" min="1" />
-      </div>
-      <div class="field">
-        <label>RAM Limit (MB)</label>
-        <input type="number" [(ngModel)]="form.ramLimit" min="512" />
-      </div>
-      <div class="field">
-        <label>Storage Limit (GB)</label>
-        <input type="number" [(ngModel)]="form.storageLimit" min="1" />
-      </div>
+  <div class="card create-card">
+    <div class="create-card-header">
+      <h2>Create space</h2>
+      <p>Define a new isolated resource pool with CPU, RAM, and storage limits.</p>
     </div>
-    <div class="form-actions">
-      <button class="btn-primary" (click)="create()">Create</button>
-      <button class="btn-secondary" (click)="showForm.set(false)">Cancel</button>
+    <div class="create-card-body">
+      @if (error()) {
+        <div class="flash flash-error">{{ error() }}</div>
+      }
+      <div class="form-grid">
+        <div class="field">
+          <label>Space name</label>
+          <input type="text" [(ngModel)]="form.name" placeholder="my-space" />
+        </div>
+        <div class="field">
+          <label>CPU limit <span class="unit-hint">(cores)</span></label>
+          <input type="number" [(ngModel)]="form.cpuLimit" min="1" placeholder="4" />
+        </div>
+        <div class="field">
+          <label>RAM limit <span class="unit-hint">(MB)</span></label>
+          <input type="number" [(ngModel)]="form.ramLimit" min="512" placeholder="8192" />
+        </div>
+        <div class="field">
+          <label>Storage limit <span class="unit-hint">(GB)</span></label>
+          <input type="number" [(ngModel)]="form.storageLimit" min="1" placeholder="100" />
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn-primary" (click)="create()">Create space</button>
+        <button class="btn-secondary" (click)="showForm.set(false)">Cancel</button>
+      </div>
     </div>
   </div>
 }
 
-<div class="card table-card">
+<div class="card" style="overflow:hidden">
+  <div class="table-toolbar">
+    <span class="toolbar-title">Spaces <span class="count">({{ spaces().length }})</span></span>
+    <div class="toolbar-actions">
+      <button class="btn-secondary btn-sm" (click)="load()">↻ Refresh</button>
+    </div>
+  </div>
+
   @if (spaces().length === 0) {
-    <div class="empty-state">No spaces yet. Create your first space above.</div>
+    <div class="empty-state">
+      <div class="empty-title">No spaces found</div>
+      <div class="empty-sub">Create a space to start managing workloads.</div>
+    </div>
   } @else {
     <table class="data-table">
       <thead>
         <tr>
           <th>Name</th>
-          <th>CPU Limit</th>
-          <th>RAM Limit</th>
-          <th>Storage Limit</th>
+          <th>CPU limit</th>
+          <th>RAM limit</th>
+          <th>Storage limit</th>
           <th>Created</th>
-          <th></th>
+          <th style="width:48px"></th>
         </tr>
       </thead>
       <tbody>
         @for (s of spaces(); track s.id) {
           <tr class="clickable" (click)="open(s.id)">
             <td class="primary">{{ s.name }}</td>
-            <td>{{ s.cpuLimit }} cores</td>
-            <td>{{ s.ramLimit }} MB</td>
+            <td>{{ s.cpuLimit }} vCPU</td>
+            <td>{{ s.ramLimit | number }} MB</td>
             <td>{{ s.storageLimit }} GB</td>
-            <td>{{ s.createdAt | date:'MMM d, y' }}</td>
-            <td><button class="btn-icon" (click)="delete(s.id, $event)" title="Delete">✕</button></td>
+            <td class="dim">{{ s.createdAt | date:'MMM d, y' }}</td>
+            <td>
+              <button class="btn-icon" (click)="delete(s.id, $event)" title="Delete space">✕</button>
+            </td>
           </tr>
         }
       </tbody>
