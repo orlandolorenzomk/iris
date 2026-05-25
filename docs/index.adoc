@@ -1,0 +1,42 @@
+= Iris — Documentation
+:toc: left
+:toc-title: Contents
+:icons: font
+
+== Platform Overview
+
+Iris is a lightweight, self-hosted cloud platform built directly on Proxmox.
+It creates infrastructure only on demand — using near-zero resources when idle.
+
+== Architecture Documents
+
+[cols="1,2", options="header"]
+|===
+| Document | Description
+
+| link:nexus-architecture.html[Iris Nexus]
+| Control plane API. Spring Boot 3 Modulith + GraalVM. Manages auth, spaces, deployments, and machine scheduling.
+
+| link:prism-architecture.html[Iris Prism]
+| Infrastructure daemon (Zig). Runs on each Proxmox node. Provisions VMs, LXCs, and virtual networks.
+
+| link:aurora-architecture.html[Iris Aurora]
+| Docker image registry (Python). OCI-compliant. Handles docker push/pull and image lifecycle.
+
+| link:network-isolation.html[Network Isolation]
+| How User Space network isolation is implemented using Proxmox SDN and VXLAN.
+|===
+
+== Component Summary
+
+[cols="1,1,1,2", options="header"]
+|===
+| Component    | Stack                   | Status         | Role
+
+| Iris Nexus   | Spring Boot 3 + GraalVM | In progress    | Control plane, single public entry point
+| Iris Panel   | Angular                 | Planned        | Web dashboard
+| Iris Prism   | Zig                     | Planned        | Per-node infrastructure daemon
+| Iris Orbit   | Zig                     | Planned        | Per-node container orchestration daemon
+| Iris Aurora  | Python                  | Planned        | Docker image registry
+| Iris CLI     | —                       | After Nexus stable | Terminal client
+|===

@@ -1,0 +1,388 @@
+= Iris — Network Isolation Architecture
+:toc: left
+:toc-title: Contents
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Design Goals
+
+Every User Space in Iris is a completely isolated network environment.
+The isolation guarantees are:
+
+* A VM in User Space A *cannot reach* any VM in User Space B, even on the same physical Proxmox host
+* A VM cannot reach the Proxmox host network or management interface
+* A VM cannot reach another user's databases, registries, or services
+* Isolation holds across multiple Proxmox nodes without any manual configuration
+* Outbound internet access is allowed but NATted — the VM's private IP is never exposed
+
+== What is a User Space
+
+A User Space is a *logical tenant boundary*, not a single VM.
+It maps to one isolated virtual network and one set of resource quotas.
+Inside a single User Space a user can run many services — a web app, a worker, a PostgreSQL LXC, a Redis LXC — each in its own VM or LXC container.
+
+[cols="1,2", options="header"]
+|===
+| Concept       | Maps to
+
+| User Space    | 1 VNet + 1 quota envelope
+| Service       | 1 VM or LXC inside that VNet
+| Deployment    | A running container inside a VM, managed by Orbit
+|===
+
+VMs and LXCs within the same User Space share a private L2 network and can reach each other directly.
+VMs in *different* User Spaces are fully isolated — they share no network, no broadcast domain, no route.
+
+== Technology Choice: Proxmox SDN
+
+Iris uses *Proxmox SDN (Software Defined Networking)* as the isolation primitive.
+Proxmox SDN is built into Proxmox VE and provides:
+
+* *Zones* — logical groupings of virtual networks with a defined transport (Simple, VLAN, VXLAN, EVPN)
+* *VNets* — virtual L2 networks inside a zone, each with its own subnet and DHCP
+* *Subnets* — IP ranges assigned to a VNet, with optional gateway and DHCP server
+
+Iris uses two zone types depending on the deployment:
+
+[cols="1,2,2", options="header"]
+|===
+| Zone Type | Used When           | Transport
+
+| Simple    | Single Proxmox node | Linux bridge, no encapsulation
+| VXLAN     | Multiple nodes      | UDP encapsulation over the node management network
+|===
+
+Iris Prism manages SDN objects directly via the Proxmox API on each host.
+When a new User Space is created, Prism provisions a dedicated VNet for it.
+
+== Network Model
+
+=== One VNet per User Space
+
+Each User Space maps 1-to-1 to a *VNet*.
+Every VM and LXC container provisioned inside a User Space is attached exclusively to that VNet.
+
+[mermaid]
+....
+graph TD
+    subgraph ProxmoxHost["Proxmox Host"]
+        subgraph Zone["SDN Zone (VXLAN or Simple)"]
+            VNet1["VNet: space-a\n10.1.0.0/24"]
+            VNet2["VNet: space-b\n10.2.0.0/24"]
+        end
+
+        subgraph SpaceA["User Space A"]
+            VM_A1["VM\n10.1.0.10"]
+            VM_A2["LXC\n10.1.0.11"]
+        end
+
+        subgraph SpaceB["User Space B"]
+            VM_B1["VM\n10.2.0.10"]
+            DB_B["LXC PostgreSQL\n10.2.0.11"]
+        end
+
+        VM_A1 & VM_A2 --- VNet1
+        VM_B1 & DB_B  --- VNet2
+    end
+
+    VNet1 -.-x VNet2
+....
+
+The dashed line with X indicates that VNet1 and VNet2 have no route between them.
+Traffic from `10.1.0.10` destined for `10.2.0.10` is dropped at the SDN layer.
+
+=== Subnet Allocation
+
+Each User Space is assigned a unique `/24` subnet from the `10.0.0.0/8` private range.
+
+----
+Space ID 1  → 10.1.0.0/24   (gateway: 10.1.0.1)
+Space ID 2  → 10.2.0.0/24   (gateway: 10.2.0.1)
+Space ID N  → 10.N.0.0/24
+----
+
+For installations with more than 65,535 spaces, Iris uses `10.{high}.{low}.0/24`
+derived from the space's integer ID.
+
+DHCP is enabled on each VNet. VMs receive their IP from a lightweight DHCP server
+managed by the Proxmox SDN layer (dnsmasq).
+
+=== VXLAN Network Identifier (VNI)
+
+On multi-node deployments, each VNet is backed by a VXLAN tunnel.
+Each space is assigned a unique VNI derived from its ID:
+
+----
+VNI = 10000 + space_id
+----
+
+VNIs are 24-bit (max ~16 million), so there is no practical limit.
+VXLAN frames are encapsulated in UDP on port 4789 and transmitted over the
+Proxmox node management network.
+
+== Single-Node Architecture
+
+On a single Proxmox host, Iris uses a *Simple* SDN zone.
+Each VNet is backed by an isolated Linux bridge (`vmbr<space_id>`).
+
+[mermaid]
+....
+graph TD
+    subgraph Host["Proxmox Host"]
+        mgmt["Management NIC\n(eth0 / bond0)"]
+
+        subgraph SDN["SDN Simple Zone"]
+            br1["Linux Bridge\nvmbr100\n(Space A)"]
+            br2["Linux Bridge\nvmbr101\n(Space B)"]
+        end
+
+        subgraph SpaceA["User Space A — 10.1.0.0/24"]
+            A1["VM 10.1.0.10"]
+            A2["LXC 10.1.0.11"]
+        end
+
+        subgraph SpaceB["User Space B — 10.2.0.0/24"]
+            B1["VM 10.2.0.10"]
+            B2["LXC 10.2.0.11"]
+        end
+
+        NAT["NAT / masquerade\n(iptables)"]
+        Internet(["Internet"])
+
+        A1 & A2 --> br1
+        B1 & B2 --> br2
+        br1 & br2 --> NAT
+        NAT --> mgmt --> Internet
+        br1 -.-x br2
+    end
+....
+
+VMs on the same host but different bridges cannot communicate because Linux bridges
+are isolated — there is no route or ARP visibility between them.
+
+== Multi-Node Architecture
+
+When User Space workloads span multiple Proxmox nodes, Iris uses a *VXLAN* SDN zone.
+VXLAN encapsulates the User Space's L2 traffic in UDP packets between nodes,
+maintaining the same logical broadcast domain across the cluster.
+
+[mermaid]
+....
+graph TD
+    subgraph Node1["Proxmox Node 1"]
+        VNet_N1_A["VNet space-a\nVNI 10001"]
+        VNet_N1_B["VNet space-b\nVNI 10002"]
+        VM_N1_A["VM 10.1.0.10"]
+        VM_N1_B["VM 10.2.0.10"]
+        VM_N1_A --- VNet_N1_A
+        VM_N1_B --- VNet_N1_B
+    end
+
+    subgraph Node2["Proxmox Node 2"]
+        VNet_N2_A["VNet space-a\nVNI 10001"]
+        VNet_N2_B["VNet space-b\nVNI 10002"]
+        VM_N2_A["VM 10.1.0.20"]
+        VM_N2_B["VM 10.2.0.20"]
+        VM_N2_A --- VNet_N2_A
+        VM_N2_B --- VNet_N2_B
+    end
+
+    VNet_N1_A <-->|"VXLAN UDP:4789\nVNI 10001"| VNet_N2_A
+    VNet_N1_B <-->|"VXLAN UDP:4789\nVNI 10002"| VNet_N2_B
+
+    VNet_N1_A -.-x VNet_N1_B
+    VNet_N2_A -.-x VNet_N2_B
+....
+
+Key properties:
+* `VM 10.1.0.10` (Node 1) and `VM 10.1.0.20` (Node 2) are on the same L2 VNet — they can communicate directly
+* `VM 10.1.0.10` and `VM 10.2.0.10` are on *different* VNets — traffic is dropped even though they share a physical node
+* VXLAN peers are discovered automatically through the Proxmox SDN controller
+
+=== Node Overflow — Expanding a Space Across Nodes
+
+A User Space is not pinned to a single node.
+When a user adds a new service and the current node has insufficient capacity,
+Nexus's node selection picks a different node for the new VM.
+The VNet's VXLAN tunnel ensures the new VM is still on the same private network as
+the existing VMs in the space, regardless of which node they are on.
+
+.Space expansion to a second node
+[mermaid]
+....
+sequenceDiagram
+    actor User
+    participant Nexus  as Iris Nexus
+    participant NATS   as NATS JetStream
+    participant Prism1 as Iris Prism (node-1) — FULL
+    participant Prism2 as Iris Prism (node-2) — available
+
+    User   ->> Nexus:  POST /deploy (new service in space-a)
+    Note over Nexus:   score nodes — node-1 filtered out (insufficient RAM)
+    Note over Nexus:   node-2 selected
+
+    Nexus  ->> NATS:   iris.prism.node-2.provision\n{space_id, vnet: space-a, VNI: 10001, ...}
+    NATS   ->> Prism2: deliver provision command
+    Prism2 ->> Prism2: create VM, attach to space-a VNet (VNI 10001)
+    Prism2 ->> NATS:   iris.events.deployments {status: vm_ready, vm_ip: 10.1.0.20}
+
+    Note over Prism1,Prism2: VM on node-2 (10.1.0.20) and VM on node-1 (10.1.0.10)\nare on the same VXLAN broadcast domain — they communicate directly
+....
+
+This means a single User Space can grow freely across as many nodes as needed,
+limited only by the space's quota and the total cluster capacity.
+The user sees one private network — the physical distribution is transparent.
+
+== Firewall Layers
+
+Network isolation is enforced at three independent layers.
+All three must be defeated simultaneously for a cross-space breach — defense in depth.
+
+[cols="1,2,3", options="header"]
+|===
+| Layer | Technology | What it enforces
+
+| 1 — SDN
+| Proxmox SDN VNet
+| L2 isolation. VMs on different VNets have no bridge connectivity.
+  No ARP visibility across spaces.
+
+| 2 — Proxmox Firewall
+| Proxmox datacenter + VM firewall
+| L3/L4 rules. DROP all traffic between VNet subnets at the hypervisor level.
+  Applied before any packet reaches the guest OS.
+
+| 3 — nftables (host)
+| nftables rules on each Proxmox node
+| Fallback rules. Block any forwarding between bridge interfaces belonging to
+  different spaces. Prevents any SDN misconfiguration from causing a leak.
+|===
+
+=== Default Firewall Ruleset (per User Space)
+
+When Prism provisions a User Space network, it applies these rules at the datacenter firewall level:
+
+----
+# Allow intra-space traffic (within the VNet)
+ACCEPT  in  iif vmbr<space_id>  out  vmbr<space_id>
+
+# Allow established/related outbound (return traffic from internet)
+ACCEPT  ct state established,related
+
+# Allow outbound to internet via NAT
+ACCEPT  out  oif <mgmt_iface>  saddr 10.<space_id>.0.0/24
+
+# DROP everything else (cross-space, host network access)
+DROP    all
+----
+
+== Outbound Internet Access
+
+User Space VMs have outbound internet access via NAT (IP masquerade).
+The Proxmox host acts as the NAT gateway for all spaces.
+
+[mermaid]
+....
+sequenceDiagram
+    participant VM  as VM (10.1.0.10)
+    participant NAT as Proxmox Host (NAT)
+    participant WEB as Internet
+
+    VM  ->> NAT: SYN → dst: 1.1.1.1:443\nsrc: 10.1.0.10
+    Note over NAT: masquerade src → host public IP
+    NAT ->> WEB: SYN → dst: 1.1.1.1:443\nsrc: <host_public_ip>
+    WEB -->> NAT: SYN-ACK
+    Note over NAT: reverse NAT → 10.1.0.10
+    NAT -->> VM: SYN-ACK
+....
+
+Inbound connections from the internet are *not* allowed by default.
+Ingress routing (exposing a service to the internet) will be addressed separately
+as a dedicated Iris component.
+
+== Network Provisioning by Iris Prism
+
+Iris Prism is responsible for all SDN operations.
+It calls the Proxmox API directly (with root privileges) to manage VNets.
+
+.Network provisioning flow (User Space creation)
+[mermaid]
+....
+sequenceDiagram
+    participant Nexus as Iris Nexus
+    participant Prism as Iris Prism
+    participant PVEAPI as Proxmox API
+    participant SDN   as Proxmox SDN
+
+    Nexus ->> Prism: create_space_network(space_id)
+
+    Prism ->> PVEAPI: POST /cluster/sdn/vnets\n{vnet: "space-{id}", zone: "iris", tag: VNI}
+    PVEAPI ->> SDN:   create VNet
+    SDN -->> PVEAPI:  ok
+    PVEAPI -->> Prism: ok
+
+    Prism ->> PVEAPI: POST /cluster/sdn/vnets/{vnet}/subnets\n{subnet: "10.{id}.0.0/24", gateway: "10.{id}.0.1", dhcp: true}
+    PVEAPI ->> SDN:   configure subnet + DHCP
+    SDN -->> PVEAPI:  ok
+    PVEAPI -->> Prism: ok
+
+    Prism ->> PVEAPI: PUT /cluster/sdn (apply pending changes)
+    PVEAPI ->> SDN:   reload SDN on all nodes
+    SDN -->> PVEAPI:  ok
+
+    Prism ->> PVEAPI: apply nftables DROP rules for cross-space forwarding
+    PVEAPI -->> Prism: ok
+
+    Prism -->> Nexus: network_ready(vnet_id, subnet)
+....
+
+.Network teardown flow (User Space deletion)
+[mermaid]
+....
+sequenceDiagram
+    participant Nexus as Iris Nexus
+    participant Prism as Iris Prism
+    participant PVEAPI as Proxmox API
+
+    Nexus ->> Prism: destroy_space_network(space_id)
+
+    Prism ->> PVEAPI: DELETE all VMs/LXCs in space
+    PVEAPI -->> Prism: ok
+
+    Prism ->> PVEAPI: DELETE /cluster/sdn/vnets/{vnet}/subnets/{subnet}
+    PVEAPI -->> Prism: ok
+
+    Prism ->> PVEAPI: DELETE /cluster/sdn/vnets/{vnet}
+    PVEAPI -->> Prism: ok
+
+    Prism ->> PVEAPI: PUT /cluster/sdn (apply)
+    PVEAPI -->> Prism: ok
+
+    Prism ->> PVEAPI: remove nftables rules for space
+    PVEAPI -->> Prism: ok
+
+    Prism -->> Nexus: network_destroyed
+....
+
+== Security Guarantees
+
+[cols="2,1", options="header"]
+|===
+| Guarantee | Enforced by
+
+| VMs in different spaces cannot exchange L2 frames | SDN VNet (bridge isolation)
+| VMs in different spaces cannot route IP packets to each other | Proxmox Firewall + nftables
+| VMs cannot reach the Proxmox host management interface | nftables DROP on host
+| VMs cannot reach the Proxmox API | nftables DROP on port 8006
+| A VM's private IP is never exposed to the internet | NAT masquerade
+| Destroying a space removes all its network objects | Prism teardown sequence
+|===
+
+[WARNING]
+====
+VXLAN traffic between Proxmox nodes travels over the node management network unencrypted.
+For production deployments the node management network should be a dedicated,
+physically isolated VLAN or bonded interface — not shared with public traffic.
+====

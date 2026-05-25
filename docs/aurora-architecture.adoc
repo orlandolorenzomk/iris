@@ -1,0 +1,271 @@
+= Iris Aurora — Architecture
+:toc: left
+:toc-title: Contents
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Overview
+
+Iris Aurora is the Docker image registry of the Iris platform.
+It implements the *OCI Distribution Specification* so users can push and pull
+images using standard Docker tooling — no custom client required.
+
+Aurora has two entry points: a direct `docker push` over HTTP, and a NATS-triggered
+deploy flow initiated by Iris Panel or Iris CLI through Nexus.
+In both cases, once the image is resolved, the rest of the deployment pipeline
+takes over via Nexus.
+
+== Technology Stack
+
+[cols="1,2", options="header"]
+|===
+| Layer      | Technology
+
+| Language   | Python
+| Protocol   | OCI Distribution Specification (HTTP)
+| Messaging  | NATS JetStream (nats-py)
+| Metadata   | PostgreSQL
+| Blob store | Local disk (per node volume)
+|===
+
+== System Context
+
+[mermaid]
+....
+graph TD
+    DockerCLI["Docker CLI\ndocker push / pull"]
+    Panel["Iris Panel\n(Angular)"]
+    CLI["Iris CLI\n(Terminal)"]
+    Nexus["Iris Nexus"]
+    NATS[("NATS JetStream")]
+    Aurora["Iris Aurora\n(Python)"]
+    DB[("PostgreSQL\nimage metadata")]
+    Disk[("Disk\nimage blobs")]
+
+    DockerCLI -->|HTTP OCI| Aurora
+    Panel     -->|REST| Nexus
+    CLI       -->|REST| Nexus
+    Nexus     -->|iris.aurora.image.deploy| NATS
+    NATS      -->|subscribe| Aurora
+    Aurora    -->|iris.events.images| NATS
+    NATS      -->|notify| Nexus
+    Aurora    --> DB
+    Aurora    --> Disk
+....
+
+== NATS Subjects
+
+=== Inbound (commands from Nexus)
+
+[cols="2,3", options="header"]
+|===
+| Subject                      | Description
+
+| `iris.aurora.image.deploy`   | Nexus triggers Aurora to validate and resolve an image ref for a Panel or CLI deploy
+|===
+
+=== Outbound (events to Nexus)
+
+[cols="2,3", options="header"]
+|===
+| Subject               | Description
+
+| `iris.events.images`  | Published when a `docker push` completes or an image is validated and ready for deployment
+|===
+
+== Responsibilities
+
+=== OCI Registry (docker push / pull)
+
+Aurora implements the OCI Distribution Spec HTTP API.
+Users authenticate with a token derived from their Nexus JWT and push images
+using the standard Docker CLI.
+
+.Supported OCI endpoints
+[cols="1,1,2", options="header"]
+|===
+| Method | Path                                          | Description
+
+| GET    | `/v2/`                                        | API version check
+| GET    | `/v2/{name}/tags/list`                        | List image tags
+| HEAD   | `/v2/{name}/blobs/{digest}`                   | Check if blob exists
+| GET    | `/v2/{name}/blobs/{digest}`                   | Download blob
+| POST   | `/v2/{name}/blobs/uploads/`                   | Initiate blob upload
+| PATCH  | `/v2/{name}/blobs/uploads/{uuid}`             | Upload blob chunk
+| PUT    | `/v2/{name}/blobs/uploads/{uuid}`             | Complete blob upload
+| GET    | `/v2/{name}/manifests/{reference}`            | Get image manifest
+| PUT    | `/v2/{name}/manifests/{reference}`            | Push image manifest (completes push)
+| DELETE | `/v2/{name}/manifests/{reference}`            | Delete image
+|===
+
+.docker push flow
+[mermaid]
+....
+sequenceDiagram
+    actor User
+    participant Docker as Docker CLI
+    participant Aurora as Iris Aurora
+    participant DB     as PostgreSQL
+    participant Disk   as Blob Store
+    participant NATS   as NATS JetStream
+
+    User   ->> Docker: docker push iris.host/space-a/myapp:v1
+    Docker ->> Aurora: GET /v2/ (auth check)
+    Aurora -->> Docker: 401 + WWW-Authenticate header
+
+    Docker ->> Aurora: GET /v2/token (Bearer JWT from Nexus)
+    Aurora ->> Aurora: validate JWT signature
+    Aurora -->> Docker: 200 + registry token
+
+    loop for each image layer
+        Docker ->> Aurora: POST /v2/{name}/blobs/uploads/
+        Aurora -->> Docker: 202 + upload UUID
+        Docker ->> Aurora: PATCH (chunk data)
+        Aurora ->> Disk:   write blob chunk
+        Docker ->> Aurora: PUT (finalize + digest)
+        Aurora ->> DB:     INSERT blob (digest, size, path)
+        Aurora -->> Docker: 201 Created
+    end
+
+    Docker ->> Aurora: PUT /v2/{name}/manifests/v1 (manifest JSON)
+    Aurora ->> DB:     INSERT manifest + tag (space-a/myapp:v1)
+    Aurora ->> NATS:   iris.events.images\n{image_ref, space_id, user_id, status: pushed}
+    Aurora -->> Docker: 201 Created
+....
+
+=== Panel / CLI Deploy Flow
+
+When a user deploys from Iris Panel or Iris CLI, they select an existing image
+from their space's catalog. Nexus publishes a command to Aurora to validate and
+resolve the image before triggering Prism and Orbit.
+
+.Panel / CLI deploy flow
+[mermaid]
+....
+sequenceDiagram
+    actor User
+    participant Nexus  as Iris Nexus
+    participant NATS   as NATS JetStream
+    participant Aurora as Iris Aurora
+    participant DB     as PostgreSQL
+
+    User   ->> Nexus:  POST /deploy {image_ref: "space-a/myapp:v1"}
+    Nexus  ->> NATS:   iris.aurora.image.deploy\n{image_ref, space_id}
+    NATS   ->> Aurora: deliver command
+    Aurora ->> DB:     SELECT manifest WHERE image_ref = "space-a/myapp:v1"
+
+    alt image not found
+        Aurora ->> NATS: iris.events.images {status: not_found}
+        NATS  -->> Nexus: error
+        Nexus -->> User: 404 Image not found
+    else image found
+        Aurora ->> NATS: iris.events.images\n{status: ready, image_ref, digest, layers}
+        NATS  -->> Nexus: image ready
+        Note over Nexus: continues with Prism/Orbit provisioning
+    end
+....
+
+=== Authentication
+
+Aurora does not manage users — it delegates authentication to Nexus.
+
+When a Docker client attempts to push or pull, Aurora returns a `401` with a
+`WWW-Authenticate` header pointing to the Nexus token endpoint.
+The client exchanges its Nexus JWT for a short-lived registry token.
+Aurora validates the token signature using Nexus's public key.
+
+[mermaid]
+....
+sequenceDiagram
+    participant Docker as Docker CLI
+    participant Aurora as Iris Aurora
+    participant Nexus  as Iris Nexus
+
+    Docker ->> Aurora: GET /v2/
+    Aurora -->> Docker: 401 WWW-Authenticate:\nBearer realm="https://nexus/v2/token"
+
+    Docker ->> Nexus:  GET /v2/token\nAuthorization: Bearer {user_jwt}
+    Nexus  ->> Nexus:  validate user JWT
+    Nexus  ->> Nexus:  issue short-lived registry token (scope: push/pull)
+    Nexus -->> Docker: 200 + registry_token
+
+    Docker ->> Aurora: GET /v2/ Authorization: Bearer {registry_token}
+    Aurora ->> Aurora: verify token signature (Nexus public key)
+    Aurora -->> Docker: 200 OK
+....
+
+== Database Schema
+
+Aurora owns the following tables. No other module may query them directly.
+
+[mermaid]
+....
+erDiagram
+    image_repositories {
+        UUID      id         PK
+        UUID      space_id
+        TEXT      name
+        TIMESTAMP created_at
+    }
+
+    image_manifests {
+        UUID      id            PK
+        UUID      repository_id FK
+        TEXT      reference
+        TEXT      digest
+        TEXT      media_type
+        BIGINT    size_bytes
+        JSONB     manifest_json
+        TIMESTAMP pushed_at
+    }
+
+    image_blobs {
+        UUID      id         PK
+        TEXT      digest     UK
+        BIGINT    size_bytes
+        TEXT      blob_path
+        TIMESTAMP created_at
+    }
+
+    manifest_blobs {
+        UUID      manifest_id FK
+        UUID      blob_id     FK
+    }
+
+    image_repositories ||--o{ image_manifests : contains
+    image_manifests    ||--o{ manifest_blobs  : references
+    image_blobs        ||--o{ manifest_blobs  : referenced_by
+....
+
+== Image Lifecycle
+
+[cols="1,2", options="header"]
+|===
+| Event              | What happens
+
+| `docker push`      | Blobs uploaded to disk, manifest and tag inserted in DB, `iris.events.images` published
+| Panel/CLI deploy   | Aurora resolves the image ref from DB, publishes `iris.events.images` with digest and layers
+| `docker pull`      | Aurora serves blobs and manifest directly from disk/DB over HTTP
+| Image delete       | Manifest and tag removed from DB, blobs garbage collected if unreferenced
+|===
+
+== What Aurora Does NOT Do
+
+[cols="2,2", options="header"]
+|===
+| Responsibility           | Handled by
+
+| Running containers       | Iris Orbit
+| VM / LXC provisioning    | Iris Prism
+| User authentication      | Iris Nexus (auth module)
+| Deployment orchestration | Iris Nexus (deployments module)
+|===
+
+== Security Considerations
+
+* Aurora never accepts unauthenticated requests — every push and pull requires a valid registry token
+* Registry tokens are short-lived and scoped to a specific image repository and operation (push or pull)
+* A user can only push to repositories within their own User Space — the space scope is embedded in the token
+* Raw Nexus user JWTs are never accepted directly by Aurora — only the short-lived registry token issued by Nexus

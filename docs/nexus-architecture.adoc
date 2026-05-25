@@ -1,0 +1,748 @@
+= Iris Nexus — Architecture
+:toc: left
+:toc-title: Contents
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Overview
+
+Iris Nexus is the central control plane of the Iris platform.
+It is the *only component exposed to the outside world* — all traffic from Iris Panel (Angular) and Iris CLI flows through it,
+and all commands to the internal engines (Prism, Orbit, Aurora) originate from it.
+
+It is built as a *Spring Boot 3 Modulith* and compiled to a *GraalVM native image* to keep idle
+resource usage near zero.
+
+== Technology Stack
+
+[cols="1,2", options="header"]
+|===
+| Layer        | Technology
+
+| Framework    | Spring Boot 3.x
+| Architecture | Spring Modulith
+| Security     | Spring Security + JWT (JJWT 0.12+)
+| Persistence  | Spring Data JPA + PostgreSQL
+| Migrations   | Flyway
+| Messaging    | NATS JetStream
+| Build        | Gradle + GraalVM Native Build Tools
+| Runtime      | GraalVM Native Image
+|===
+
+== System Context
+
+Nexus is the single entry point for all clients — no internal engine is reachable from outside directly.
+Clients can be either Iris Panel (Angular web UI) or Iris CLI (terminal).
+
+[mermaid]
+....
+graph TD
+    Panel["Iris Panel\n(Angular)"]
+    CLI["Iris CLI\n(Terminal)"]
+    DockerCLI["Docker CLI"]
+    Nexus["Iris Nexus\n(Spring Boot 3 Modulith)"]
+    NATS[("NATS JetStream")]
+    Aurora["Iris Aurora\n(Python)"]
+
+    subgraph Node1["Proxmox Node 1"]
+        Prism1["Iris Prism"]
+        Orbit1["Iris Orbit"]
+        PVE1["Proxmox API"]
+        Prism1 --> PVE1
+        Orbit1 --> Prism1
+    end
+
+    subgraph Node2["Proxmox Node 2"]
+        Prism2["Iris Prism"]
+        Orbit2["Iris Orbit"]
+        PVE2["Proxmox API"]
+        Prism2 --> PVE2
+        Orbit2 --> Prism2
+    end
+
+    Panel     -->|REST / WebSocket| Nexus
+    CLI       -->|REST| Nexus
+    DockerCLI -->|HTTP OCI| Aurora
+    Nexus     -->|publish commands| NATS
+    NATS      -->|iris.prism.node-1.*| Prism1
+    NATS      -->|iris.orbit.node-1.*| Orbit1
+    NATS      -->|iris.prism.node-2.*| Prism2
+    NATS      -->|iris.orbit.node-2.*| Orbit2
+    NATS      <-->|deploy cmds + events| Aurora
+    Prism1    -->|iris.events.*| NATS
+    Orbit1    -->|iris.events.*| NATS
+    Prism2    -->|iris.events.*| NATS
+    Orbit2    -->|iris.events.*| NATS
+....
+
+== Internal Structure
+
+Nexus is a single deployable unit divided into four logically isolated modules.
+Modules *never* query each other's database tables — all cross-module coordination
+happens through Spring Modulith application events.
+
+[mermaid]
+....
+graph TD
+    Security["Spring Security\nJWT Filter Chain"]
+
+    subgraph Nexus["Iris Nexus"]
+        Security --> Auth["auth"]
+        Security --> Spaces["spaces"]
+        Security --> Deployments["deployments"]
+        Security --> Machines["machines"]
+        Auth        --> PG[("PostgreSQL")]
+        Spaces      --> PG
+        Deployments --> PG
+        Machines    --> PG
+    end
+....
+
+== Modules
+
+=== auth
+
+Handles user registration, login, and JWT issuance.
+All other modules consume the identity it establishes.
+
+Iris has two roles:
+
+[cols="1,3", options="header"]
+|===
+| Role    | Description
+
+| `OWNER` | Created once at startup from `.env` values. Has full access to all resources and machines.
+           Cannot be deleted — attempting to delete the OWNER account is rejected at the application level.
+| `USER`  | Registered through the API. Can only manage their own spaces and deployments.
+           No access to machine management or cluster settings.
+|===
+
+The `OWNER` account is seeded on first startup if it does not already exist.
+Credentials are read from environment variables (`ADMIN_DEFAULT_EMAIL`, `ADMIN_DEFAULT_PASSWORD`).
+If the account already exists, the seed step is skipped — subsequent restarts never overwrite it.
+
+The role is embedded in the JWT as a claim and verified by Spring Security on each request.
+
+.Responsibilities
+* Seed the OWNER account on first startup from `.env` — skip if already present
+* Register new USER accounts via the API with BCrypt-hashed passwords
+* Authenticate users and return a signed JWT carrying the role claim
+* Expose user identity and role claims to other modules via internal events
+* Enforce resource-level ownership (a USER can only access their own spaces and deployments)
+* Reject deletion of the OWNER account
+
+.Startup OWNER seed flow
+[mermaid]
+....
+sequenceDiagram
+    participant Nexus as Nexus (auth)
+    participant DB    as PostgreSQL
+
+    Note over Nexus: application startup
+    Nexus ->> DB:    SELECT user WHERE email = $ADMIN_DEFAULT_EMAIL
+    alt not found
+        Nexus ->> Nexus: hash $ADMIN_DEFAULT_PASSWORD with BCrypt
+        Nexus ->> DB:    INSERT user (email, password, role=OWNER)
+        DB   -->> Nexus: ok
+    else already exists
+        Note over Nexus: skip — owner already seeded
+    end
+....
+
+.Auth & request flow
+[mermaid]
+....
+sequenceDiagram
+    actor Client
+    participant Nexus as Nexus (auth)
+    participant DB as PostgreSQL
+
+    Client ->> Nexus: POST /auth/register
+    Nexus  ->> DB:    INSERT user (role = USER)
+    DB    -->> Nexus: ok
+    Nexus -->> Client: 201 Created
+
+    Client ->> Nexus: POST /auth/login
+    Nexus  ->> DB:    SELECT user
+    DB    -->> Nexus: user row
+    Note over Nexus: verify BCrypt hash
+    Note over Nexus: sign JWT (includes role claim)
+    Nexus -->> Client: 200 + JWT
+
+    Client ->> Nexus: GET /spaces [Bearer JWT]
+    Note over Nexus: verify signature
+    Note over Nexus: extract claims → role + user_id → forward to spaces module
+    Nexus -->> Client: 200 + spaces[]
+....
+
+=== spaces
+
+Manages the lifecycle of User Spaces and enforces resource quotas.
+No deployment can proceed without passing through this module's quota check.
+
+.Responsibilities
+* Create and delete User Spaces
+* Store per-space quota definitions (CPU, RAM, storage)
+* Track current resource usage per space
+* Reject deployments that would exceed quota before they reach the deployments module
+* Track the network state of each space (`space_networks`) — VNet ID, subnet, VNI, and provisioning status
+
+.Quota enforcement flow
+[mermaid]
+....
+sequenceDiagram
+    actor Client
+    participant Spaces as Nexus (spaces)
+    participant DB as PostgreSQL
+
+    Client ->> Spaces: POST /spaces
+    Spaces ->> DB:     INSERT space
+    DB    -->> Spaces: ok
+    Spaces -->> Client: 201 + space
+
+    Client ->> Spaces: POST /deploy [Bearer JWT]
+    Spaces ->> DB:     SELECT current usage
+    DB    -->> Spaces: usage row
+
+    alt quota exceeded
+        Spaces -->> Client: 429 Quota Exceeded
+    else quota ok
+        Note over Spaces: emit DeploymentAllowed event
+    end
+....
+
+=== deployments
+
+Orchestrates all deployment requests by coordinating Prism, Aurora, and Orbit.
+It does not provision infrastructure directly — it delegates to the correct engine and tracks state.
+
+.Responsibilities
+* Consume `DeploymentAllowed` events from the spaces module
+* Tell Prism to provision a VM or LXC
+* Tell Aurora to resolve the image reference
+* Tell Orbit to schedule and run the container
+* Persist and expose deployment state
+
+.Deployment orchestration flow
+[mermaid]
+....
+sequenceDiagram
+    actor Client
+    participant D    as Nexus (deployments)
+    participant A    as Iris Aurora
+    participant NATS as NATS JetStream
+
+    Client ->> D:    POST /deploy
+    D      ->> A:    resolve image (HTTP)
+    A     -->> D:    image ref
+
+    D      ->> NATS: iris.prism.{node}.network
+    D      ->> NATS: iris.prism.{node}.provision
+    D     -->> Client: 202 Accepted + deployment_id
+
+    Note over NATS: Prism/Orbit process async
+    NATS  -->> D:    iris.events.deployments (status=running)
+    D      ->> D:    UPDATE deployment status=running
+
+    Client ->> D:    GET /deployments/{id}
+    D     -->> Client: 200 running
+....
+
+=== machines
+
+Manages the registration, lifecycle, and real-time capacity tracking of Proxmox host machines.
+The primary machine — the one Nexus is hosted on — is bootstrapped automatically on first start.
+All additional machines are registered manually and connected over SSH.
+
+.Responsibilities
+* Auto-configure the primary Proxmox host on startup
+* Store connection details for additional machines (IP, SSH port, SSH user)
+* Encrypt all credentials at rest using AES secret keys — never exposed through the API
+* Bootstrap Prism and Orbit on newly registered remote nodes via SSH
+* Receive and persist capacity heartbeats from Prism into `machine_stats`
+* Expose node selection logic to the deployments module
+* Store cluster-wide infrastructure settings in `cluster_settings` (SDN zone type, zone name, NATS URL) — always a single row
+* Store per-node management interface name in `machines.mgmt_iface` — can differ per node (e.g. `eth0` on one node, `bond0` on another)
+* Track per-node network apply state in `machine_networks` to drive Prism reconciliation
+
+==== Node Selection
+
+When the `deployments` module needs to place a workload, it calls the `machines` module
+to select the best available node.
+
+Selection runs in two steps:
+
+. *Filter* — discard any node whose free CPU, RAM, or disk cannot satisfy the workload requirements
+. *Rank* — score each remaining node and pick the highest
+
+The scoring function weighs free capacity as a percentage of total capacity:
+
+[source,java]
+----
+double score(MachineStats stats) {
+    double cpu  = stats.getFreeCpu()  / stats.getTotalCpu();
+    double ram  = stats.getFreeRam()  / stats.getTotalRam();
+    double disk = stats.getFreeDisk() / stats.getTotalDisk();
+
+    return (cpu * 0.4) + (ram * 0.4) + (disk * 0.2);
+}
+----
+
+RAM and CPU are weighted equally at 40% each — the primary bottlenecks for most workloads.
+Disk is weighted at 20%. If two nodes share the same score, the tiebreaker is the node
+with the fewest active deployments.
+
+==== Heartbeat Processing
+
+Every few seconds, each Prism instance publishes its current resource usage to NATS:
+
+----
+iris.heartbeat.{node_id}  →  { cpu_free, cpu_total, ram_free, ram_total, disk_free, disk_total }
+----
+
+Nexus consumes these events and upserts the `machine_stats` table.
+If a heartbeat is missed for more than 30 seconds, the node is marked `unavailable`
+and excluded from scheduling until heartbeats resume.
+
+.Heartbeat flow
+[mermaid]
+....
+sequenceDiagram
+    participant Prism as Iris Prism (node-1)
+    participant NATS  as NATS JetStream
+    participant M     as Nexus (machines)
+    participant DB    as PostgreSQL
+
+    loop every 5 seconds
+        Prism ->> NATS: iris.heartbeat.node-1\n{cpu_free, ram_free, disk_free, ...}
+        NATS  ->> M:    deliver heartbeat
+        M     ->> DB:   UPSERT machine_stats (node-1)
+    end
+
+    Note over Prism: node goes offline
+    Note over M: no heartbeat for 30s
+    M     ->> DB: UPDATE machines SET status = unavailable WHERE id = node-1
+....
+
+.Machine registration flow
+[mermaid]
+....
+sequenceDiagram
+    actor Admin
+    participant M  as Nexus (machines)
+    participant DB as PostgreSQL
+    participant Remote as Remote Proxmox
+
+    Note over M: On first startup
+    M  ->> DB: INSERT machine (primary, localhost)
+
+    Admin ->> M: POST /machines (ip, port, ssh_user, ssh_key)
+    M     ->> DB: INSERT machine (credentials encrypted)
+    DB   -->> M: ok
+
+    M     ->> Remote: SSH connect
+    M     ->> Remote: bootstrap Iris Prism + Iris Orbit
+    Remote -->> M: ready
+
+    M     ->> DB: UPDATE machine status = active
+    M    -->> Admin: 201 Created
+....
+
+[NOTE]
+====
+SSH credentials and secret keys are encrypted at rest using AES-256.
+The raw key material is never returned by any API endpoint.
+====
+
+==== Network State Tracking and Reconciliation
+
+Nexus is the source of truth for which Proxmox nodes have each space's VNet applied.
+This is tracked in `machine_networks` — a junction between `machines` and `space_networks`.
+
+.`machine_networks.status` values
+[cols="1,3", options="header"]
+|===
+| Status            | Meaning
+
+| `pending_apply`   | Nexus has published the network command to Prism but has not yet received confirmation
+| `active`          | Prism confirmed the VNet is live on this node
+| `pending_destroy` | Nexus has published the destroy command but Prism has not yet confirmed removal
+| `destroyed`       | VNet has been torn down on this node
+|===
+
+This table drives two critical operations:
+
+*Space deletion* — when a User Space is deleted, Nexus queries `machine_networks` to find every
+node where the space's VNet is `active`, then publishes a destroy command to each node's Prism.
+It waits for all entries to reach `destroyed` before marking the space as fully deleted.
+
+.Network teardown across nodes
+[mermaid]
+....
+sequenceDiagram
+    actor User
+    participant Nexus as Iris Nexus
+    participant DB    as PostgreSQL
+    participant NATS  as NATS JetStream
+    participant P1    as Iris Prism (node-1)
+    participant P2    as Iris Prism (node-2)
+
+    User  ->> Nexus: DELETE /spaces/{id}
+    Nexus ->> DB:    SELECT machine_networks WHERE space_network_id = X AND status = active
+    DB   -->> Nexus: [node-1, node-2]
+
+    Nexus ->> DB:    UPDATE machine_networks SET status = pending_destroy
+    Nexus ->> NATS:  iris.prism.node-1.network.destroy {vnet_id}
+    Nexus ->> NATS:  iris.prism.node-2.network.destroy {vnet_id}
+
+    P1   ->> NATS:   iris.events.deployments {status: network_destroyed, node: node-1}
+    P2   ->> NATS:   iris.events.deployments {status: network_destroyed, node: node-2}
+
+    Nexus ->> DB:    UPDATE machine_networks SET status = destroyed (both rows)
+    Nexus ->> DB:    UPDATE space_networks SET status = destroyed
+    Nexus ->> DB:    UPDATE spaces SET status = deleted
+....
+
+*Node recovery* — when a Prism that was `unavailable` resumes sending heartbeats,
+Nexus queries `machine_networks` for all `active` networks on that node and re-publishes
+each network command so Prism can re-apply any nftables rules that were lost on reboot.
+
+.Prism reconnect reconciliation
+[mermaid]
+....
+sequenceDiagram
+    participant Prism as Iris Prism (node-2)
+    participant NATS  as NATS JetStream
+    participant Nexus as Iris Nexus
+    participant DB    as PostgreSQL
+
+    Note over Prism: node rebooted — nftables rules lost
+    Prism ->> NATS:  iris.heartbeat.node-2 (resumes)
+    NATS -->> Nexus: heartbeat received
+
+    Nexus ->> DB:    SELECT machine_networks WHERE machine_id = node-2 AND status = active
+    DB   -->> Nexus: [space-a VNet, space-b VNet]
+
+    Nexus ->> NATS:  iris.prism.node-2.network {space-a config}
+    Nexus ->> NATS:  iris.prism.node-2.network {space-b config}
+
+    Prism ->> Prism: re-apply nftables rules for space-a, space-b
+    Prism ->> NATS:  iris.events.deployments {status: network_ready} (x2)
+....
+
+== Database Schema
+
+Each module owns its own tables. Cross-module access is forbidden.
+
+[mermaid]
+....
+erDiagram
+    users {
+        UUID      id         PK
+        TEXT      email
+        TEXT      password
+        TEXT      role
+        BOOLEAN   deletable
+        TIMESTAMP created_at
+    }
+
+    spaces {
+        UUID      id             PK
+        UUID      user_id        FK
+        TEXT      name
+        INT       cpu_limit
+        INT       ram_limit
+        BIGINT    storage_limit
+        TIMESTAMP created_at
+    }
+
+    space_networks {
+        UUID      id         PK
+        UUID      space_id   FK
+        TEXT      vnet_id
+        TEXT      subnet
+        INT       vni
+        TEXT      status
+        TIMESTAMP created_at
+    }
+
+    deployments {
+        UUID      id         PK
+        UUID      space_id   FK
+        UUID      machine_id FK
+        TEXT      image_ref
+        TEXT      vm_id
+        TEXT      container_id
+        TEXT      status
+        TIMESTAMP created_at
+    }
+
+    machines {
+        UUID      id            PK
+        TEXT      name
+        TEXT      host
+        INT       ssh_port
+        TEXT      ssh_user
+        TEXT      ssh_key_enc
+        TEXT      secret_key_id
+        TEXT      mgmt_iface
+        BOOLEAN   is_primary
+        TEXT      status
+        TIMESTAMP created_at
+    }
+
+    machine_stats {
+        UUID      id                 PK
+        UUID      machine_id         FK
+        DOUBLE    cpu_free
+        DOUBLE    cpu_total
+        BIGINT    ram_free
+        BIGINT    ram_total
+        BIGINT    disk_free
+        BIGINT    disk_total
+        INT       active_deployments
+        TIMESTAMP last_heartbeat
+    }
+
+    machine_networks {
+        UUID      id                PK
+        UUID      machine_id        FK
+        UUID      space_network_id  FK
+        TEXT      status
+        TIMESTAMP applied_at
+    }
+
+    cluster_settings {
+        BOOLEAN   lock
+        TEXT      sdn_zone_type
+        TEXT      sdn_zone_name
+        TEXT      nats_url
+        TIMESTAMP updated_at
+    }
+
+    users            ||--o{ spaces            : owns
+    spaces           ||--|| space_networks    : has
+    spaces           ||--o{ deployments       : contains
+    machines         ||--o{ deployments       : targets
+    machines         ||--|| machine_stats     : tracks
+    machines         ||--o{ machine_networks  : has
+    space_networks   ||--o{ machine_networks  : tracked_by
+....
+
+[NOTE]
+====
+`cluster_settings` is a singleton table — it always contains exactly one row.
+Enforced in PostgreSQL with `lock BOOLEAN DEFAULT true PRIMARY KEY CHECK (lock)`.
+The application reads it on startup and caches it; writes are rare (initial setup or admin reconfiguration only).
+
+`machines.mgmt_iface` is stored per node because interface names are not guaranteed to be consistent
+across different Proxmox hosts (e.g. `eth0` vs `ens3` vs `bond0`).
+Prism uses this value when applying nftables NAT rules and VXLAN peering.
+====
+
+== Internal Engine Communication
+
+Nexus communicates with Prism, Orbit, and Aurora asynchronously via *NATS JetStream*
+for all management and event-driven operations.
+
+Aurora is a special case: the actual `docker push` / `docker pull` flow must remain HTTP
+because the Docker client speaks the OCI distribution spec directly and cannot be changed.
+Everything else — image push notifications, deploy triggers from the Panel or CLI, catalog
+queries — goes through NATS.
+
+[cols="1,2,2", options="header"]
+|===
+| Target      | Protocol                     | Reason
+
+| Iris Prism  | NATS JetStream               | Async VM/LXC provisioning across multiple nodes
+| Iris Orbit  | NATS JetStream               | Async container lifecycle management
+| Iris Aurora | HTTP (OCI) + NATS JetStream  | HTTP for docker push/pull (protocol requirement), NATS for all management and events
+|===
+
+[NOTE]
+====
+User JWTs never leave Nexus. NATS messages carry a service-level credential so Prism,
+Orbit, and Aurora reject any message that did not originate from Nexus.
+====
+
+== Messaging Architecture
+
+=== Why NATS JetStream
+
+NATS JetStream is the persistence layer on top of NATS core.
+It provides at-least-once delivery, consumer acknowledgment, and message replay —
+critical for operations like VM provisioning that must not be silently dropped.
+
+The Zig client for Prism and Orbit uses the official *nats.c* C library via Zig's
+`@cImport`, requiring zero custom protocol implementation.
+
+=== Subject Naming Convention
+
+All Iris messages follow a structured subject hierarchy:
+
+----
+iris.{component}.{node_id}.{action}
+----
+
+[cols="2,3", options="header"]
+|===
+| Subject                          | Description
+
+| `iris.prism.{node_id}.provision` | Provision a VM or LXC on a specific node
+| `iris.prism.{node_id}.destroy`   | Destroy a VM or LXC on a specific node
+| `iris.prism.{node_id}.network`   | Create or tear down a User Space VNet
+| `iris.orbit.{node_id}.schedule`  | Schedule a container task on a specific node
+| `iris.orbit.{node_id}.stop`      | Stop a running container task
+| `iris.orbit.{node_id}.scale`     | Scale replicas up or down
+| `iris.aurora.image.deploy`       | Nexus triggers a deploy using a specific image (Panel or CLI)
+| `iris.events.deployments`        | Status events published back to Nexus by Prism/Orbit
+| `iris.events.images`             | Aurora notifies Nexus when a new image push completes
+|===
+
+The `{node_id}` segment allows Nexus to target a specific Proxmox node.
+Each Prism/Orbit instance subscribes only to subjects matching its own node ID.
+
+=== Image Push vs Panel/CLI Deploy
+
+Users have two ways to deploy an image:
+
+[cols="1,2,2", options="header"]
+|===
+| Method         | Flow                                        | Entry point
+
+| `docker push`  | Docker CLI → HTTP → Aurora → NATS event     | OCI registry HTTP endpoint
+| Panel / CLI    | User selects image → Nexus → NATS → Aurora  | Nexus REST API
+|===
+
+In both cases, once the image is resolved, Nexus publishes the provisioning commands
+to Prism and Orbit via NATS — the rest of the flow is identical.
+
+[mermaid]
+....
+sequenceDiagram
+    participant DockerCLI as Docker CLI
+    participant PanelCLI  as Panel / Iris CLI
+    participant Aurora    as Iris Aurora
+    participant NATS      as NATS JetStream
+    participant Nexus     as Iris Nexus
+
+    alt docker push
+        DockerCLI ->> Aurora: docker push (HTTP OCI)
+        Aurora    ->> NATS:   iris.events.images (image_ref, user_id)
+        NATS     -->> Nexus:  image available notification
+    else deploy from Panel or CLI
+        PanelCLI  ->> Nexus:  POST /deploy (image_ref)
+        Nexus     ->> NATS:   iris.aurora.image.deploy (image_ref)
+        NATS     -->> Aurora: resolve + validate image
+        Aurora    ->> NATS:   iris.events.images (image_ref, validated)
+        NATS     -->> Nexus:  image ready
+    end
+
+    Note over Nexus: continues with Prism/Orbit provisioning
+....
+
+=== JetStream Streams
+
+[cols="1,2,1", options="header"]
+|===
+| Stream         | Subjects                  | Retention
+
+| `PRISM_CMDS`   | `iris.prism.>`            | Until acknowledged
+| `ORBIT_CMDS`   | `iris.orbit.>`            | Until acknowledged
+| `AURORA_CMDS`  | `iris.aurora.>`           | Until acknowledged
+| `IRIS_EVENTS`  | `iris.events.>`           | 24 hours
+|===
+
+=== Async Deployment Flow
+
+Operations like VM provisioning are inherently slow (seconds to minutes).
+Nexus publishes a command and returns `202 Accepted` immediately.
+Prism/Orbit publish status events back on `iris.events.deployments` as work progresses.
+
+[mermaid]
+....
+sequenceDiagram
+    actor Client
+    participant Nexus
+    participant NATS  as NATS JetStream
+    participant Prism as Iris Prism (node-1)
+    participant Orbit as Iris Orbit (node-1)
+
+    Client ->> Nexus: POST /deploy
+    Note over Nexus: persist deployment (status=pending)
+
+    Nexus  ->> NATS: publish iris.prism.node-1.provision
+    Nexus  ->> NATS: publish iris.prism.node-1.network
+    Nexus -->> Client: 202 Accepted + deployment_id
+
+    NATS   ->> Prism: iris.prism.node-1.network
+    Prism  ->> Prism: create VNet via Proxmox API
+    Prism  ->> NATS:  publish iris.events.deployments (network=ready)
+    NATS  -->> Prism: ACK
+
+    NATS   ->> Prism: iris.prism.node-1.provision
+    Prism  ->> Prism: create VM via Proxmox API
+    Prism  ->> NATS:  publish iris.events.deployments (vm=ready, vm_id=...)
+    NATS  -->> Prism: ACK
+
+    Nexus  ->> NATS: publish iris.orbit.node-1.schedule (vm_id + image_ref)
+    NATS   ->> Orbit: iris.orbit.node-1.schedule
+    Orbit  ->> Orbit: pull image + run container
+    Orbit  ->> NATS:  publish iris.events.deployments (status=running)
+    NATS  -->> Orbit: ACK
+
+    NATS   ->> Nexus: iris.events.deployments (status=running)
+    Nexus  ->> Nexus: UPDATE deployment status=running
+
+    Client ->> Nexus: GET /deployments/{id}
+    Nexus -->> Client: 200 running
+....
+
+=== Stub Implementation During Development
+
+Prism and Orbit do not exist yet. During Nexus development, a stub consumer
+runs in-process and immediately acknowledges all commands with a fake success event.
+
+[source,java]
+----
+@Component
+@Profile("stub")
+public class StubPrismConsumer {
+
+    @NatsListener(subject = "iris.prism.*.provision")
+    public void onProvision(ProvisionCommand cmd) {
+        // publish a fake success event back
+        eventPublisher.publish(DeploymentEvent.vmReady(cmd.deploymentId(), "stub-vm-" + UUID.randomUUID()));
+    }
+}
+----
+
+This allows the full Nexus request/response cycle — including status polling — to work
+end-to-end without any Proxmox infrastructure.
+
+== GraalVM Native Build
+
+Nexus compiles to a native binary using GraalVM ahead-of-time compilation,
+eliminating JVM warmup and significantly reducing memory footprint.
+
+[source,bash]
+----
+./gradlew nativeCompile
+----
+
+.Key considerations
+* Spring Boot 3.x AOT processing handles most internal reflection automatically
+* Custom reflection must be declared via `@RegisterReflectionForBinding` or a `RuntimeHintsRegistrar`
+* JJWT 0.12+ ships with native-image metadata — no additional hints needed
+* Flyway migrations run at startup and are fully compatible with native images
+
+.Expected native image profile
+[cols="1,1,1", options="header"]
+|===
+| Metric       | JVM     | Native
+
+| Startup time | ~3s     | < 100ms
+| Idle RSS     | ~250 MB | ~40 MB
+|===

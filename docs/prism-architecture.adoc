@@ -1,0 +1,296 @@
+= Iris Prism — Architecture
+:toc: left
+:toc-title: Contents
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Overview
+
+Iris Prism is the infrastructure daemon of the Iris platform.
+It runs on every Proxmox node with *root privileges* and is the only component
+that speaks directly to Proxmox — creating VMs, LXC containers, and virtual networks
+on command from Nexus.
+
+Prism has no business logic. It does not know about users, images, or deployments.
+It receives a command, executes it against the Proxmox API, and reports the result back.
+
+One Prism instance runs per Proxmox node. Each instance is scoped exclusively to its
+own node — it never touches another node's infrastructure.
+
+== Technology Stack
+
+[cols="1,2", options="header"]
+|===
+| Layer       | Technology
+
+| Language    | Zig
+| Runtime     | Native binary, runs as a systemd service
+| Messaging   | NATS JetStream (via nats.c C library, imported with @cImport)
+| Proxmox API | HTTP (Proxmox REST API + local CLI: qm, pct)
+| Privileges  | Root (required for qm, pct, nftables, SDN API)
+|===
+
+== System Context
+
+Prism sits between Nexus (via NATS) and the Proxmox host it runs on.
+
+[mermaid]
+....
+graph TD
+    Nexus["Iris Nexus\n(Spring Boot)"]
+    NATS[("NATS JetStream")]
+    Prism["Iris Prism\n(Zig daemon)"]
+    PVE["Proxmox API\n(qm / pct / SDN)"]
+    VMs["VMs"]
+    LXCs["LXC Containers"]
+    VNets["VNets\n(SDN)"]
+
+    Nexus  -->|publish commands| NATS
+    NATS   -->|iris.prism.node-N.*| Prism
+    Prism  -->|provision / destroy| PVE
+    Prism  -->|publish events| NATS
+    PVE    --> VMs
+    PVE    --> LXCs
+    PVE    --> VNets
+....
+
+== NATS Subjects
+
+=== Inbound (commands from Nexus)
+
+[cols="2,3", options="header"]
+|===
+| Subject                          | Description
+
+| `iris.prism.{node_id}.provision` | Provision a new VM or LXC container
+| `iris.prism.{node_id}.destroy`   | Destroy a VM or LXC container
+| `iris.prism.{node_id}.network`   | Create a User Space VNet + subnet
+| `iris.prism.{node_id}.network.destroy` | Tear down a User Space VNet
+|===
+
+Prism subscribes *only* to subjects matching its own `node_id`.
+Commands for other nodes are never delivered to it.
+
+=== Outbound (events to Nexus)
+
+[cols="2,3", options="header"]
+|===
+| Subject                    | Description
+
+| `iris.heartbeat.{node_id}` | Capacity heartbeat published every 5 seconds
+| `iris.events.deployments`  | Result events after completing or failing a command
+|===
+
+== Responsibilities
+
+=== VM Provisioning
+
+Prism creates QEMU VMs via the Proxmox `qm` CLI.
+Each VM is provisioned from a base template and configured with the
+CPU, RAM, and disk limits specified in the command payload.
+
+.Provision command payload
+[source,json]
+----
+{
+  "deployment_id": "uuid",
+  "space_id":      "uuid",
+  "node_id":       "node-1",
+  "type":          "vm",
+  "cpu_cores":     2,
+  "ram_mb":        2048,
+  "disk_gb":       20,
+  "vnet_id":       "space-42"
+}
+----
+
+.VM provisioning flow
+[mermaid]
+....
+sequenceDiagram
+    participant NATS  as NATS JetStream
+    participant Prism as Iris Prism
+    participant PVE   as Proxmox API
+
+    NATS  ->> Prism: iris.prism.node-1.provision
+    Prism ->> PVE:   qm clone {template_id} {vm_id} --full
+    PVE  -->> Prism: ok
+
+    Prism ->> PVE:   qm set {vm_id} --cores 2 --memory 2048
+    Prism ->> PVE:   qm set {vm_id} --net0 virtio,bridge={vnet_id}
+    Prism ->> PVE:   qm start {vm_id}
+    PVE  -->> Prism: ok
+
+    Prism ->> NATS:  iris.events.deployments\n{status: vm_ready, vm_id: ...}
+    NATS -->> Prism: ACK
+....
+
+=== LXC Provisioning
+
+LXC containers are used for Iris built-in services — PostgreSQL, Redis, MinIO, and Keycloak.
+They are lighter than VMs and start in seconds.
+Prism creates them via the `pct` CLI.
+
+.Provision command payload (LXC)
+[source,json]
+----
+{
+  "deployment_id": "uuid",
+  "space_id":      "uuid",
+  "node_id":       "node-1",
+  "type":          "lxc",
+  "service":       "postgresql",
+  "cpu_cores":     1,
+  "ram_mb":        512,
+  "disk_gb":       10,
+  "vnet_id":       "space-42"
+}
+----
+
+.LXC provisioning flow
+[mermaid]
+....
+sequenceDiagram
+    participant NATS  as NATS JetStream
+    participant Prism as Iris Prism
+    participant PVE   as Proxmox API
+
+    NATS  ->> Prism: iris.prism.node-1.provision (type=lxc)
+    Prism ->> PVE:   pct create {ct_id} {template}\n--cores 1 --memory 512\n--net0 bridge={vnet_id}
+    PVE  -->> Prism: ok
+
+    Prism ->> PVE:   pct start {ct_id}
+    PVE  -->> Prism: ok
+
+    Prism ->> NATS:  iris.events.deployments\n{status: lxc_ready, ct_id: ...}
+    NATS -->> Prism: ACK
+....
+
+=== Network Management
+
+When a User Space is created, Prism provisions its isolated virtual network
+via the Proxmox SDN API. See the network isolation architecture document for
+the full isolation model.
+
+.Network provisioning flow
+[mermaid]
+....
+sequenceDiagram
+    participant NATS  as NATS JetStream
+    participant Prism as Iris Prism
+    participant SDN   as Proxmox SDN API
+
+    NATS  ->> Prism: iris.prism.node-1.network\n{space_id, vni, subnet}
+
+    Prism ->> SDN:   POST /cluster/sdn/vnets\n{vnet: space-{id}, zone: iris, tag: VNI}
+    SDN  -->> Prism: ok
+
+    Prism ->> SDN:   POST /cluster/sdn/vnets/{vnet}/subnets\n{subnet, gateway, dhcp: true}
+    SDN  -->> Prism: ok
+
+    Prism ->> SDN:   PUT /cluster/sdn (apply)
+    SDN  -->> Prism: ok
+
+    Prism ->> Prism: apply nftables DROP rules
+    Prism ->> NATS:  iris.events.deployments\n{status: network_ready, vnet_id: ...}
+    NATS -->> Prism: ACK
+....
+
+=== Capacity Heartbeat
+
+Every 5 seconds Prism reads the node's current resource usage and publishes it to NATS.
+Nexus uses this data to populate `machine_stats` and make scheduling decisions.
+
+.Heartbeat payload
+[source,json]
+----
+{
+  "node_id":            "node-1",
+  "cpu_free":           6.2,
+  "cpu_total":          8.0,
+  "ram_free_mb":        12288,
+  "ram_total_mb":       16384,
+  "disk_free_gb":       380,
+  "disk_total_gb":      500,
+  "active_deployments": 4,
+  "timestamp":          "2026-05-24T10:00:00Z"
+}
+----
+
+If Nexus receives no heartbeat from a node for *30 seconds*, it marks the node
+as `unavailable` and stops scheduling new workloads on it.
+
+== Destroy Flows
+
+=== Destroy VM or LXC
+
+[mermaid]
+....
+sequenceDiagram
+    participant NATS  as NATS JetStream
+    participant Prism as Iris Prism
+    participant PVE   as Proxmox API
+
+    NATS  ->> Prism: iris.prism.node-1.destroy\n{vm_id or ct_id, type}
+
+    alt VM
+        Prism ->> PVE: qm stop {vm_id}
+        Prism ->> PVE: qm destroy {vm_id}
+    else LXC
+        Prism ->> PVE: pct stop {ct_id}
+        Prism ->> PVE: pct destroy {ct_id}
+    end
+
+    PVE  -->> Prism: ok
+    Prism ->> NATS:  iris.events.deployments {status: destroyed}
+    NATS -->> Prism: ACK
+....
+
+=== Destroy Network
+
+[mermaid]
+....
+sequenceDiagram
+    participant NATS  as NATS JetStream
+    participant Prism as Iris Prism
+    participant SDN   as Proxmox SDN API
+
+    NATS  ->> Prism: iris.prism.node-1.network.destroy\n{vnet_id}
+
+    Prism ->> SDN:   DELETE /cluster/sdn/vnets/{vnet}/subnets/{subnet}
+    Prism ->> SDN:   DELETE /cluster/sdn/vnets/{vnet}
+    Prism ->> SDN:   PUT /cluster/sdn (apply)
+    Prism ->> Prism: remove nftables rules for space
+
+    SDN  -->> Prism: ok
+    Prism ->> NATS:  iris.events.deployments {status: network_destroyed}
+    NATS -->> Prism: ACK
+....
+
+== What Prism Does NOT Do
+
+[cols="2,2", options="header"]
+|===
+| Responsibility              | Handled by
+
+| Container orchestration inside VMs | Iris Orbit
+| Docker image management     | Iris Aurora
+| User authentication         | Iris Nexus (auth module)
+| Deployment scheduling       | Iris Nexus (machines module)
+| Business logic              | Iris Nexus
+|===
+
+== Security Considerations
+
+* Prism runs as root — it must be deployed on the Proxmox host only, never exposed to the network directly
+* All inbound NATS messages are verified against a service-level credential issued by Nexus
+* Messages from unknown origins are dropped immediately
+* The Proxmox API token used by Prism is scoped to VM/LXC/SDN operations only — no datacenter-level permissions
+
+[WARNING]
+====
+Prism's NATS subject is scoped to its node ID. A compromised Nexus credential can only
+affect the nodes it has published to — not the entire cluster.
+====

@@ -1,0 +1,277 @@
+= Iris Orbit — Architecture
+:toc: left
+:toc-title: Contents
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+
+== Overview
+
+Iris Orbit is the container orchestration daemon of the Iris platform.
+It runs on every Proxmox node alongside Iris Prism with one clear responsibility:
+manage what runs *inside* the VMs that Prism has already provisioned.
+
+Orbit is the ECS equivalent of Iris — it schedules containers, keeps services alive,
+health checks them, and scales them. It has no knowledge of infrastructure provisioning,
+networking, or image storage. It picks up exactly where Prism leaves off.
+
+One Orbit instance runs per Proxmox node, scoped exclusively to the VMs on that node.
+
+== Technology Stack
+
+[cols="1,2", options="header"]
+|===
+| Layer      | Technology
+
+| Language   | Zig
+| Runtime    | Native binary, runs as a systemd service alongside Prism
+| Messaging  | NATS JetStream (via nats.c C library, imported with @cImport)
+| VM access  | SSH (key injected by Prism at VM creation time)
+| Container  | Docker (running inside each VM)
+|===
+
+== System Context
+
+[mermaid]
+....
+graph TD
+    Nexus["Iris Nexus"]
+    NATS[("NATS JetStream")]
+    Orbit["Iris Orbit\n(Zig daemon)"]
+    Prism["Iris Prism\n(Zig daemon)"]
+    Aurora["Iris Aurora\n(Python)"]
+    VM1["VM\n(User Space A)"]
+    VM2["VM\n(User Space B)"]
+
+    Nexus  -->|publish commands| NATS
+    NATS   -->|iris.orbit.node-N.*| Orbit
+    Prism  -->|VM ready + SSH key| Orbit
+    Orbit  -->|SSH| VM1
+    Orbit  -->|SSH| VM2
+    VM1    -->|docker pull| Aurora
+    VM2    -->|docker pull| Aurora
+    Orbit  -->|iris.events.deployments| NATS
+    NATS   -->|status events| Nexus
+....
+
+== NATS Subjects
+
+=== Inbound (commands from Nexus)
+
+[cols="2,3", options="header"]
+|===
+| Subject                         | Description
+
+| `iris.orbit.{node_id}.schedule` | Schedule and start a container inside a VM
+| `iris.orbit.{node_id}.stop`     | Stop a running container and clean up
+| `iris.orbit.{node_id}.scale`    | Scale replicas up or down across VMs on this node
+|===
+
+=== Outbound (events to Nexus)
+
+[cols="2,3", options="header"]
+|===
+| Subject                    | Description
+
+| `iris.events.deployments`  | Container status events — started, healthy, unhealthy, restarted, stopped
+|===
+
+== Responsibilities
+
+=== Container Scheduling
+
+When Orbit receives a schedule command it SSHes into the target VM and starts
+the container using the Docker CLI. The image is pulled directly from Iris Aurora
+inside the VM.
+
+.Schedule command payload
+[source,json]
+----
+{
+  "deployment_id": "uuid",
+  "space_id":      "uuid",
+  "vm_id":         "101",
+  "vm_ip":         "10.1.0.10",
+  "image_ref":     "space-a/myapp:v1",
+  "aurora_host":   "aurora.iris.internal",
+  "env":           { "PORT": "3000", "ENV": "production" },
+  "ports":         [3000],
+  "restart":       "always",
+  "cpu_shares":    512,
+  "mem_limit":     "512m"
+}
+----
+
+.Container scheduling flow
+[mermaid]
+....
+sequenceDiagram
+    participant NATS   as NATS JetStream
+    participant Orbit  as Iris Orbit
+    participant VM     as VM (10.1.0.10)
+    participant Aurora as Iris Aurora
+
+    NATS  ->> Orbit: iris.orbit.node-1.schedule
+    Orbit ->> VM:    SSH connect (injected key)
+
+    VM    ->> Aurora: docker pull space-a/myapp:v1
+    Aurora -->> VM:  image layers
+
+    Note over Orbit,VM: docker run --name {id} --restart always\n--env PORT=3000 --publish 3000:3000\n--cpus 0.5 --memory 512m space-a/myapp:v1
+    Orbit ->> VM:    start container
+
+    VM   -->> Orbit: container ID
+    Orbit ->> NATS:  iris.events.deployments\n{status: running, container_id}
+    NATS -->> Orbit: ACK
+....
+
+=== Health Checking
+
+After a container is started, Orbit continuously monitors it by polling
+`docker inspect` over SSH at a regular interval.
+
+If a container is found stopped or in a restart loop, Orbit publishes an
+`unhealthy` event to Nexus so the deployment status is updated accordingly.
+
+.Health check flow
+[mermaid]
+....
+sequenceDiagram
+    participant Orbit as Iris Orbit
+    participant VM    as VM (SSH)
+    participant NATS  as NATS JetStream
+
+    loop every 10 seconds
+        Orbit ->> VM:   docker inspect {container_id}
+        VM   -->> Orbit: state: {running | stopped | restarting}
+
+        alt healthy
+            Note over Orbit: no action
+        else stopped unexpectedly
+            Orbit ->> NATS: iris.events.deployments\n{status: unhealthy, container_id}
+        end
+    end
+....
+
+=== Auto-Restart
+
+Containers scheduled with `"restart": "always"` are managed by Docker's own
+restart policy inside the VM. Orbit does not need to restart them manually —
+Docker handles it. Orbit's health check detects if the restart loop is failing
+and reports it to Nexus.
+
+For containers that should not auto-restart (one-off tasks), Orbit watches for
+exit and publishes a `completed` or `failed` event depending on the exit code.
+
+=== Scaling
+
+When Nexus publishes a scale command, Orbit adds or removes container replicas
+on VMs across its node.
+
+.Scale command payload
+[source,json]
+----
+{
+  "deployment_id": "uuid",
+  "replicas":      3,
+  "vms":           [
+    { "vm_id": "101", "vm_ip": "10.1.0.10" },
+    { "vm_id": "102", "vm_ip": "10.1.0.11" },
+    { "vm_id": "103", "vm_ip": "10.1.0.12" }
+  ]
+}
+----
+
+.Scaling flow
+[mermaid]
+....
+sequenceDiagram
+    participant NATS  as NATS JetStream
+    participant Orbit as Iris Orbit
+    participant VM1   as VM 10.1.0.10
+    participant VM2   as VM 10.1.0.11
+    participant VM3   as VM 10.1.0.12
+
+    NATS  ->> Orbit: iris.orbit.node-1.scale\n{replicas: 3, vms: [...]}
+
+    Orbit ->> VM1: docker run myapp:v1 (replica 1)
+    Orbit ->> VM2: docker run myapp:v1 (replica 2)
+    Orbit ->> VM3: docker run myapp:v1 (replica 3)
+
+    VM1  -->> Orbit: running
+    VM2  -->> Orbit: running
+    VM3  -->> Orbit: running
+
+    Orbit ->> NATS: iris.events.deployments\n{status: scaled, replicas: 3}
+    NATS -->> Orbit: ACK
+....
+
+=== Container Stop and Cleanup
+
+[mermaid]
+....
+sequenceDiagram
+    participant NATS  as NATS JetStream
+    participant Orbit as Iris Orbit
+    participant VM    as VM (SSH)
+
+    NATS  ->> Orbit: iris.orbit.node-1.stop\n{deployment_id, vm_id, vm_ip}
+    Orbit ->> VM:    docker stop {container_id}
+    Orbit ->> VM:    docker rm {container_id}
+    VM   -->> Orbit: ok
+    Orbit ->> NATS:  iris.events.deployments {status: stopped}
+    NATS -->> Orbit: ACK
+....
+
+== SSH Key Model
+
+Prism injects an SSH key pair into each VM at creation time via cloud-init.
+The private key is passed to Orbit when the VM is ready so it can connect.
+
+[mermaid]
+....
+sequenceDiagram
+    participant Nexus as Iris Nexus
+    participant NATS  as NATS JetStream
+    participant Prism as Iris Prism
+    participant Orbit as Iris Orbit
+    participant VM    as New VM
+
+    Nexus ->> NATS:  iris.prism.node-1.provision
+    Prism ->> Prism: generate SSH key pair
+    Prism ->> VM:    inject public key via cloud-init
+    Prism ->> NATS:  iris.events.deployments\n{status: vm_ready, vm_id, vm_ip, ssh_private_key}
+
+    NATS  ->> Nexus: vm_ready event
+    Nexus ->> NATS:  iris.orbit.node-1.schedule\n{vm_id, vm_ip, ssh_private_key, image_ref, ...}
+    NATS  ->> Orbit: deliver schedule command
+    Orbit ->> VM:    SSH connect using private key
+....
+
+[NOTE]
+====
+The SSH private key is passed through NATS only within the cluster's internal network
+and is never exposed through the Nexus API or stored permanently.
+It exists only for the lifetime of the deployment command.
+====
+
+== What Orbit Does NOT Do
+
+[cols="2,2", options="header"]
+|===
+| Responsibility              | Handled by
+
+| VM / LXC provisioning       | Iris Prism
+| Network / VNet management   | Iris Prism
+| Image storage and registry  | Iris Aurora
+| Deployment scheduling       | Iris Nexus (machines module)
+| Business logic              | Iris Nexus
+|===
+
+== Security Considerations
+
+* All inbound NATS messages are verified against a service-level credential issued by Nexus
+* SSH keys are ephemeral — generated per VM by Prism, used once to schedule, never stored
+* Orbit only connects to VMs within its own node — it has no knowledge of other nodes' VMs
+* Docker commands are executed inside the VM's isolated User Space network — Orbit cannot reach host-level resources from within the container
